@@ -7,6 +7,8 @@ data/
 /public/
 docs/*
 !docs/MULTI_AGENT_WORKFLOW.md
+docs/FINGERPRINT_UPDATE_AND_NATIVE_TLS_REUSE.md
+docs/WS_AND_ALPHA_SEARCH_ROOT_CAUSE.md
 bin/*
 !bin/README.md
 .env
