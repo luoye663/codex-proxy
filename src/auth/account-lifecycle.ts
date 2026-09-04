@@ -77,7 +77,12 @@ export class AccountLifecycle {
     }
   }
 
-  acquire(options?: { model?: string; excludeIds?: string[]; preferredEntryId?: string }): AcquiredAccount | null {
+  acquire(options?: {
+    model?: string;
+    excludeIds?: string[];
+    preferredEntryId?: string;
+    requiredEntryId?: string;
+  }): AcquiredAccount | null {
     const nowMs = Date.now();
     const now = new Date(nowMs);
 
@@ -95,6 +100,7 @@ export class AccountLifecycle {
 
     const available = entries.filter(
       (a) =>
+        (!options?.requiredEntryId || a.id === options.requiredEntryId) &&
         a.status === "active" &&
         this.slotCount(a.id) < maxConcurrent &&
         (!excludeSet || !excludeSet.has(a.id)) &&
@@ -140,7 +146,11 @@ export class AccountLifecycle {
 
     // Session affinity: prefer the account that owns the conversation
     let selected: AccountEntry;
-    if (options?.preferredEntryId) {
+    if (options?.requiredEntryId) {
+      // Explicit previous_response_id continuity is physically bound to one
+      // account/WS lane. Never silently rotate it to another account.
+      selected = candidates[0];
+    } else if (options?.preferredEntryId) {
       const preferred = candidates.find((a) => a.id === options.preferredEntryId);
       selected = preferred ?? this.strategy.select(candidates, this.rotationState);
     } else {

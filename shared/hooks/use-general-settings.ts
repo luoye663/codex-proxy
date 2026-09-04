@@ -23,6 +23,7 @@ export interface GeneralSettingsData {
   ws_pool_enabled: boolean;
   ws_pool_max_per_account: number;
   ws_pool_max_age_ms: number;
+  ws_pool_owner_tombstone_ttl_ms: number;
   ws_pool_effective_max_per_account: number;
   request_interval_ms: number | null;
   auto_update: boolean;
@@ -100,6 +101,7 @@ export function useGeneralSettings(apiKey: string | null) {
         ws_pool_enabled: result.ws_pool_enabled,
         ws_pool_max_per_account: result.ws_pool_max_per_account,
         ws_pool_max_age_ms: result.ws_pool_max_age_ms,
+        ws_pool_owner_tombstone_ttl_ms: result.ws_pool_owner_tombstone_ttl_ms,
         ws_pool_effective_max_per_account: result.ws_pool_effective_max_per_account,
         request_interval_ms: result.request_interval_ms,
         auto_update: result.auto_update,

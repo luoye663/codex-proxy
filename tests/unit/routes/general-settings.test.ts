@@ -31,7 +31,12 @@ const mockConfig = {
     max_concurrent_per_account: 3 as number | null,
     request_interval_ms: 50 as number | null,
   },
-  ws_pool: { enabled: true, max_per_account: 8, max_age_ms: 3_300_000 },
+  ws_pool: {
+    enabled: true,
+    max_per_account: 8,
+    max_age_ms: 3_300_000,
+    owner_tombstone_ttl_ms: 86_400_000,
+  },
   update: { auto_update: true, auto_download: false, show_update_dialog: false, allow_prerelease: false },
   logs: { enabled: false, capacity: 2000, capture_body: false, llm_only: true },
   usage_stats: {
@@ -157,6 +162,7 @@ describe("GET /admin/general-settings", () => {
       ws_pool_enabled: true,
       ws_pool_max_per_account: 8,
       ws_pool_max_age_ms: 3_300_000,
+      ws_pool_owner_tombstone_ttl_ms: 86_400_000,
       ws_pool_effective_max_per_account: 8,
       auto_update: true,
       auto_download: false,
@@ -262,6 +268,7 @@ describe("POST /admin/general-settings", () => {
         ws_pool_enabled: false,
         ws_pool_max_per_account: 12,
         ws_pool_max_age_ms: 2_700_000,
+        ws_pool_owner_tombstone_ttl_ms: 172_800_000,
       }),
     });
 
@@ -279,6 +286,7 @@ describe("POST /admin/general-settings", () => {
         enabled: false,
         max_per_account: 12,
         max_age_ms: 2_700_000,
+        owner_tombstone_ttl_ms: 172_800_000,
       },
     });
   });

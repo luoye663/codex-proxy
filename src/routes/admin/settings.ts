@@ -130,6 +130,7 @@ export function createSettingsRoutes(accountPool?: AccountPool): Hono {
       enabled: DEFAULT_WS_POOL_CONFIG.enabled,
       max_per_account: DEFAULT_WS_POOL_CONFIG.maxPerAccount,
       max_age_ms: DEFAULT_WS_POOL_CONFIG.maxAgeMs,
+      owner_tombstone_ttl_ms: DEFAULT_WS_POOL_CONFIG.ownerTombstoneTtlMs,
     };
     return c.json({
       port: config.server.port,
@@ -152,6 +153,7 @@ export function createSettingsRoutes(accountPool?: AccountPool): Hono {
       ws_pool_enabled: wsPool.enabled,
       ws_pool_max_per_account: wsPool.max_per_account,
       ws_pool_max_age_ms: wsPool.max_age_ms,
+      ws_pool_owner_tombstone_ttl_ms: wsPool.owner_tombstone_ttl_ms,
       ws_pool_effective_max_per_account: effectiveWsPoolMaxPerAccount(
         wsPool.max_per_account,
         config.auth.max_concurrent_per_account,
@@ -191,6 +193,7 @@ export function createSettingsRoutes(accountPool?: AccountPool): Hono {
       ws_pool_enabled?: boolean;
       ws_pool_max_per_account?: number;
       ws_pool_max_age_ms?: number;
+      ws_pool_owner_tombstone_ttl_ms?: number;
       request_interval_ms?: number | null;
       auto_update?: boolean;
       auto_download?: boolean;
@@ -321,6 +324,14 @@ export function createSettingsRoutes(accountPool?: AccountPool): Hono {
       return c.json({ error: "ws_pool_max_age_ms must be an integer >= 1" });
     }
 
+    if (body.ws_pool_owner_tombstone_ttl_ms !== undefined &&
+        (!Number.isInteger(body.ws_pool_owner_tombstone_ttl_ms) ||
+          body.ws_pool_owner_tombstone_ttl_ms < 3_600_000 ||
+          body.ws_pool_owner_tombstone_ttl_ms > 604_800_000)) {
+      c.status(400);
+      return c.json({ error: "ws_pool_owner_tombstone_ttl_ms must be between 1 and 168 hours" });
+    }
+
     if (body.request_interval_ms !== undefined && body.request_interval_ms !== null) {
       if (!Number.isInteger(body.request_interval_ms) || body.request_interval_ms < 0) {
         c.status(400);
@@ -415,7 +426,8 @@ export function createSettingsRoutes(accountPool?: AccountPool): Hono {
       }
       if (body.ws_pool_enabled !== undefined ||
           body.ws_pool_max_per_account !== undefined ||
-          body.ws_pool_max_age_ms !== undefined) {
+          body.ws_pool_max_age_ms !== undefined ||
+          body.ws_pool_owner_tombstone_ttl_ms !== undefined) {
         if (!data.ws_pool) data.ws_pool = {};
         if (body.ws_pool_enabled !== undefined) {
           (data.ws_pool as Record<string, unknown>).enabled = body.ws_pool_enabled;
@@ -425,6 +437,9 @@ export function createSettingsRoutes(accountPool?: AccountPool): Hono {
         }
         if (body.ws_pool_max_age_ms !== undefined) {
           (data.ws_pool as Record<string, unknown>).max_age_ms = body.ws_pool_max_age_ms;
+        }
+        if (body.ws_pool_owner_tombstone_ttl_ms !== undefined) {
+          (data.ws_pool as Record<string, unknown>).owner_tombstone_ttl_ms = body.ws_pool_owner_tombstone_ttl_ms;
         }
       }
       if (body.request_interval_ms !== undefined) {
@@ -486,6 +501,7 @@ export function createSettingsRoutes(accountPool?: AccountPool): Hono {
       enabled: DEFAULT_WS_POOL_CONFIG.enabled,
       max_per_account: DEFAULT_WS_POOL_CONFIG.maxPerAccount,
       max_age_ms: DEFAULT_WS_POOL_CONFIG.maxAgeMs,
+      owner_tombstone_ttl_ms: DEFAULT_WS_POOL_CONFIG.ownerTombstoneTtlMs,
     };
     const restartRequired =
       (body.port !== undefined && body.port !== oldPort) ||
@@ -512,6 +528,7 @@ export function createSettingsRoutes(accountPool?: AccountPool): Hono {
       ws_pool_enabled: updatedWsPool.enabled,
       ws_pool_max_per_account: updatedWsPool.max_per_account,
       ws_pool_max_age_ms: updatedWsPool.max_age_ms,
+      ws_pool_owner_tombstone_ttl_ms: updatedWsPool.owner_tombstone_ttl_ms,
       ws_pool_effective_max_per_account: effectiveWsPoolMaxPerAccount(
         updatedWsPool.max_per_account,
         updated.auth.max_concurrent_per_account,

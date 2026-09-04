@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 import type { StatusCode } from "hono/utils/http-status";
-import type { FormatAdapter, ProxyRequest } from "./proxy-handler-types.js";
+import type { FormatAdapter, ProxyErrorDetails, ProxyRequest } from "./proxy-handler-types.js";
 import { canReturnStreamError, streamErrorResponse } from "./stream-error-response.js";
 
 export interface AccountPoolSummary {
@@ -27,6 +27,7 @@ export interface RespondWithProxyErrorOptions {
   status: number;
   message: string;
   useFormat429?: boolean;
+  details?: ProxyErrorDetails;
 }
 
 export function buildAccountExhaustionDetail(summary: AccountPoolSummary, message: string): string {
@@ -58,10 +59,14 @@ export function respondWithNoAccount(options: RespondWithNoAccountOptions): Resp
 }
 
 export function respondWithProxyError(options: RespondWithProxyErrorOptions): Response {
-  const { c, req, fmt, status, message, useFormat429 = false } = options;
+  const { c, req, fmt, status, message, useFormat429 = false, details } = options;
   if (canReturnStreamError(req, fmt)) {
-    return streamErrorResponse(c, fmt, status, message);
+    return streamErrorResponse(c, fmt, status, message, details);
   }
   c.status(status as StatusCode);
-  return c.json(useFormat429 ? fmt.format429(message) : fmt.formatError(status, message));
+  return c.json(useFormat429 && !details
+    ? fmt.format429(message)
+    : details
+      ? fmt.formatError(status, message, details)
+      : fmt.formatError(status, message));
 }

@@ -262,6 +262,39 @@ describe("streamPassthrough premature close handling", () => {
     ]);
   });
 
+  it("treats response.incomplete as terminal and continuable", async () => {
+    const onCompleted = vi.fn();
+    const api = createMockApi([
+      { event: "response.created", data: { response: { id: "resp_incomplete" } } },
+      {
+        event: "response.incomplete",
+        data: {
+          response: {
+            id: "resp_incomplete",
+            status: "incomplete",
+            output: [],
+            usage: { input_tokens: 8, output_tokens: 3 },
+          },
+        },
+      },
+    ]);
+    const chunks: string[] = [];
+    for await (const chunk of streamPassthrough(
+      api as never,
+      new Response("ok"),
+      "test-model",
+      () => {},
+      () => {},
+      undefined,
+      undefined,
+      onCompleted,
+    )) chunks.push(chunk);
+
+    expect(chunks.join("")).toContain("event: response.incomplete");
+    expect(chunks.join("")).not.toContain("stream_disconnected");
+    expect(onCompleted).toHaveBeenCalledWith("resp_incomplete");
+  });
+
   it("signals response completion only on response.completed", async () => {
     const onCompleted = vi.fn();
     const api = createMockApi([

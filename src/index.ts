@@ -145,6 +145,7 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
       cfg.ws_pool.max_per_account,
       cfg.auth.max_concurrent_per_account,
     ),
+    ownerTombstoneTtlMs: cfg.ws_pool.owner_tombstone_ttl_ms,
   });
   const adapters = new Map<string, UpstreamAdapter>();
   if (cfg.providers.openai) {

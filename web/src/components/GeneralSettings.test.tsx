@@ -27,6 +27,7 @@ const mockGeneralSettingsData = {
   ws_pool_enabled: true,
   ws_pool_max_per_account: 8,
   ws_pool_max_age_ms: 3_300_000,
+  ws_pool_owner_tombstone_ttl_ms: 86_400_000,
   ws_pool_effective_max_per_account: 8,
   request_interval_ms: 50,
   auto_update: true,
@@ -137,6 +138,18 @@ describe("GeneralSettings - WebSocket pool", () => {
 
     await waitFor(() => {
       expect(mockSave).toHaveBeenCalledWith({ ws_pool_max_per_account: 12 });
+    });
+  });
+
+  it("converts lost-owner diagnostic retention from hours to milliseconds", async () => {
+    render(<GeneralSettings />);
+
+    const input = screen.getByDisplayValue("24") as HTMLInputElement;
+    fireEvent.input(input, { target: { value: "48" } });
+    fireEvent.click(screen.getByTitle("settingSave"));
+
+    await waitFor(() => {
+      expect(mockSave).toHaveBeenCalledWith({ ws_pool_owner_tombstone_ttl_ms: 172_800_000 });
     });
   });
 });

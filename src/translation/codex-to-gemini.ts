@@ -122,6 +122,7 @@ export async function* streamCodexToGemini(
         break;
       }
 
+      case "response.incomplete":
       case "response.completed": {
         // Flush buffered tuple text as reconverted JSON
         if (tupleTextBuffer !== null && tupleSchema && tupleTextBuffer) {

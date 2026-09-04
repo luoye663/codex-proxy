@@ -202,6 +202,9 @@ export const ConfigSchema = z.object({
     /** Cap on concurrent pooled connections per account, to bound memory
      *  when a user opens many parallel conversations. */
     max_per_account: z.number().int().positive().default(8),
+    /** Keep only the reason an owner disappeared. This does not extend the
+     *  lifetime of the physical WebSocket or persist conversation history. */
+    owner_tombstone_ttl_ms: z.number().int().min(3_600_000).max(604_800_000).default(86_400_000),
   }).default({}),
   ollama: z.object({
     enabled: z.boolean().default(false),

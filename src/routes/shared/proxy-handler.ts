@@ -35,10 +35,11 @@ import { ResponsesUpstream } from "../../proxy/responses-upstream.js";
 import type {
   FormatAdapter,
   HandleProxyRequestOptions,
+  ProxyErrorDetails,
   ProxyRequest,
 } from "./proxy-handler-types.js";
 import { getSessionAffinityMap } from "../../auth/session-affinity.js";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import {
   respondWithNoAccount,
   respondWithProxyError,
@@ -61,11 +62,21 @@ import { classifyRetryAction } from "./proxy-retry-classifier.js";
 import { buildProxySessionContext } from "./proxy-session-context.js";
 import { staggerIfNeeded } from "./proxy-stagger.js";
 import { sendProxyUpstreamAttempt } from "./proxy-upstream-attempt.js";
-import { buildWsPoolContext, forgetWsResponseOwner } from "./proxy-ws-context.js";
+import {
+  buildWsPoolContext,
+  evictWsResponseOwnerLane,
+  forgetWsResponseOwner,
+  lookupWsResponseOwner,
+} from "./proxy-ws-context.js";
 import {
   containsInvalidEncryptedContentSignal,
   getReasoningReplayCache,
 } from "../../proxy/reasoning-replay-cache.js";
+import type { PreviousResponseContinuityReason } from "../../proxy/codex-types.js";
+
+function fingerprintCredential(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
 
 /**
  * Respond when no OAuth account is available. When a fallback upstream apikey
@@ -108,6 +119,7 @@ async function respondProxyErrorOrFallback(
   status: number,
   message: string,
   useFormat429?: boolean,
+  details?: ProxyErrorDetails,
 ): Promise<Response> {
   const fallback = options.fallbackUpstream?.get();
   if (fallback) {
@@ -122,7 +134,7 @@ async function respondProxyErrorOrFallback(
       fmt,
     });
   }
-  return respondWithProxyError({ c: options.c, req, fmt, status, message, useFormat429 });
+  return respondWithProxyError({ c: options.c, req, fmt, status, message, useFormat429, details });
 }
 
 export async function handleProxyRequest(options: HandleProxyRequestOptions): Promise<Response> {
@@ -148,9 +160,92 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
   const released = new Set<string>();
   const verifiedExcludeIds: string[] = [];
 
-  // Single acquire call — preferredEntryId is a hint, not a hard requirement
-  let acquired = acquireAccount(accountPool, req.codexRequest.model, undefined, fmt.tag, sessionContext.preferredEntryId ?? undefined);
+  // An explicit WS continuation is physically bound to the account/socket
+  // that observed the response ID. Resolve it before account rotation.
+  const strictPreviousResponseId =
+    req.codexRequest.useWebSocket ? sessionContext.explicitPrevRespId : undefined;
+  const ownerLookup = strictPreviousResponseId
+    ? lookupWsResponseOwner(strictPreviousResponseId)
+    : null;
+  if (ownerLookup?.kind === "gone") {
+    const reason = ownerLookup.tombstone.reason;
+    return respondWithProxyError({
+      c, req, fmt, status: 410,
+      message: `The WebSocket history for previous_response_id is no longer available (${reason}).`,
+      details: {
+        type: "invalid_request_error",
+        code: "ws_response_history_gone",
+        continuityReason: reason,
+        retryable: false,
+      },
+    });
+  }
+  if (ownerLookup?.kind === "unknown" && !sessionContext.preferredEntryId) {
+    return respondWithProxyError({
+      c, req, fmt, status: 410,
+      message: "The WebSocket owner for previous_response_id is unknown to this proxy process.",
+      details: {
+        type: "invalid_request_error",
+        code: "ws_response_history_gone",
+        continuityReason: "unknown_owner",
+        retryable: false,
+      },
+    });
+  }
+  const requiredEntryId = ownerLookup?.kind === "live"
+    ? ownerLookup.entryId
+    : strictPreviousResponseId
+      ? sessionContext.preferredEntryId ?? undefined
+      : undefined;
+
+  let acquired = acquireAccount(
+    accountPool,
+    req.codexRequest.model,
+    undefined,
+    fmt.tag,
+    sessionContext.preferredEntryId ?? undefined,
+    requiredEntryId,
+  );
   if (!acquired) {
+    if (requiredEntryId) {
+      const entry = accountPool.getEntry(requiredEntryId);
+      const concurrency = accountPool.getAccounts()
+        .find((candidate) => candidate.id === requiredEntryId)?.concurrency;
+      const permanentReasonByStatus: Partial<Record<string, PreviousResponseContinuityReason>> = {
+        expired: "account_expired",
+        banned: "account_banned",
+        disabled: "account_disabled",
+        quota_exhausted: "account_quota_exhausted",
+      };
+      const permanentReason = entry ? permanentReasonByStatus[entry.status] : "account_removed";
+      if (permanentReason) {
+        return respondWithProxyError({
+          c, req, fmt, status: 410,
+          message: `The account owning previous_response_id is permanently unavailable (${permanentReason}).`,
+          details: {
+            type: "invalid_request_error",
+            code: "ws_response_history_gone",
+            continuityReason: permanentReason,
+            retryable: false,
+          },
+        });
+      }
+      const reason: PreviousResponseContinuityReason =
+        concurrency && concurrency.used >= concurrency.limit
+          ? "account_concurrency_limit"
+          : "account_temporarily_unavailable";
+      c.header("Retry-After", "1");
+      return respondWithProxyError({
+        c, req, fmt, status: 429,
+        message: `The account owning previous_response_id is temporarily unavailable (${reason}).`,
+        details: {
+          type: "rate_limit_error",
+          code: "ws_response_owner_unavailable",
+          continuityReason: reason,
+          retryable: true,
+        },
+      });
+    }
     return respondNoAccountOrFallback(options, req, fmt);
   }
 
@@ -185,9 +280,35 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
           verifyAttempts++;
           if (verifyAttempts >= MAX_VERIFY_ATTEMPTS) {
             console.warn(`[${fmt.tag}] ⚠️ Drift-defense hit MAX_VERIFY_ATTEMPTS (${MAX_VERIFY_ATTEMPTS}). Giving up to avoid excess upstream calls.`);
+            if (requiredEntryId) {
+              c.header("Retry-After", "1");
+              return respondWithProxyError({
+                c, req, fmt, status: 429,
+                message: "The account owning previous_response_id is temporarily rate-limited.",
+                details: {
+                  type: "rate_limit_error",
+                  code: "ws_response_owner_unavailable",
+                  continuityReason: "account_temporarily_unavailable",
+                  retryable: true,
+                },
+              });
+            }
             return respondNoAccountOrFallback(options, req, fmt);
           }
 
+          if (requiredEntryId) {
+            c.header("Retry-After", "1");
+            return respondWithProxyError({
+              c, req, fmt, status: 429,
+              message: "The account owning previous_response_id is temporarily rate-limited.",
+              details: {
+                type: "rate_limit_error",
+                code: "ws_response_owner_unavailable",
+                continuityReason: "account_temporarily_unavailable",
+                retryable: true,
+              },
+            });
+          }
           acquired = acquireAccount(accountPool, req.codexRequest.model, verifiedExcludeIds, fmt.tag, sessionContext.preferredEntryId ?? undefined);
           if (!acquired) {
             return respondNoAccountOrFallback(options, req, fmt);
@@ -206,6 +327,7 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
 
   if (!acquired) return respondNoAccountOrFallback(options, req, fmt);
   let { entryId } = acquired;
+  let credentialGeneration = fingerprintCredential(acquired.token);
   // First account this request acquired; later attempts that switch to another
   // entry (fallback account retry) are marked as fallback in the audit log.
   const initialEntryId = entryId;
@@ -330,6 +452,7 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
       requestId,
       tag: fmt.tag,
       poolKeySuffix: recoveryWsKeySuffix,
+      credentialGeneration,
     });
 
   for (;;) {
@@ -487,34 +610,131 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
         }
 
         case "error_handler_decides": {
-          const decision = handleCodexApiError(
-            err as CodexApiError, accountPool, entryId, req.codexRequest.model, fmt.tag, modelRetried, cookieJar,
-            earlyServerErrorRetried,
-          );
+          const liveOwner = req.codexRequest.previous_response_id
+            ? lookupWsResponseOwner(req.codexRequest.previous_response_id)
+            : null;
+          const requestCredentialGeneration = liveOwner?.kind === "live"
+            ? liveOwner.credentialGeneration ?? credentialGeneration
+            : credentialGeneration;
+          const currentToken = accountPool.getEntry(entryId)?.token;
+          const currentCredentialGeneration = currentToken
+            ? fingerprintCredential(currentToken)
+            : undefined;
+          const credentialWasRotated =
+            currentCredentialGeneration !== undefined &&
+            currentCredentialGeneration !== requestCredentialGeneration;
+          const decision = credentialWasRotated && (err as CodexApiError).status === 401
+            ? (() => {
+                // A refresh may race an older authenticated lane. Its 401 must
+                // not expire the newly-refreshed account generation.
+                const previousResponseId = req.codexRequest.previous_response_id;
+                if (previousResponseId) {
+                  evictWsResponseOwnerLane(previousResponseId, "connection_replaced");
+                  return {
+                    action: "respond" as const,
+                    status: 410,
+                    message: "The WebSocket owner used an older credential generation after token refresh.",
+                    details: {
+                      type: "invalid_request_error",
+                      code: "ws_response_history_gone",
+                      continuityReason: "connection_replaced",
+                      retryable: false,
+                    },
+                  };
+                }
+                return {
+                  action: "respond" as const,
+                  status: 503,
+                  message: "The request used an older credential generation; retry with the refreshed account.",
+                  details: {
+                    type: "server_error",
+                    code: "ws_pool_connection_unavailable",
+                    retryable: true,
+                  },
+                };
+              })()
+            : handleCodexApiError(
+                err as CodexApiError, accountPool, entryId, req.codexRequest.model, fmt.tag, modelRetried, cookieJar,
+                earlyServerErrorRetried,
+              );
 
+          // Explicit continuations cannot rotate accounts: server-side state
+          // is on the owning physical lane. Surface the owner's failure to the
+          // downstream caller and preserve its opportunity to retry.
+          let continuitySafeDecision = decision;
+          if (requiredEntryId && decision.action === "retry") {
+            const permanentStatusReason: Partial<Record<number, PreviousResponseContinuityReason>> = {
+              401: accountPool.getEntry(entryId)?.status === "banned"
+                ? "account_banned"
+                : "account_expired",
+              402: "account_quota_exhausted",
+              403: "account_banned",
+            };
+            const permanentReason = permanentStatusReason[decision.status];
+            continuitySafeDecision = permanentReason
+              ? {
+                  action: "respond" as const,
+                  status: 410,
+                  message: `The account owning previous_response_id is permanently unavailable (${permanentReason}).`,
+                  details: {
+                    type: "invalid_request_error",
+                    code: "ws_response_history_gone",
+                    continuityReason: permanentReason,
+                    retryable: false,
+                  },
+                }
+              : decision.status === 429
+                ? {
+                    action: "respond" as const,
+                    status: 429,
+                    message: decision.message,
+                    details: {
+                      type: "rate_limit_error",
+                      code: "ws_response_owner_unavailable",
+                      continuityReason: "account_temporarily_unavailable",
+                      retryable: true,
+                    },
+                  }
+                : {
+                    action: "respond" as const,
+                    status: decision.status,
+                    message: decision.message,
+                    ...(decision.details ? { details: decision.details } : {}),
+                  };
+          }
           const errorRetryTransition = applyProxyErrorRetryTransition({
             accountPool, entryId,
             model: req.codexRequest.model,
             triedEntryIds, tag: fmt.tag,
-            decision, released,
+            decision: continuitySafeDecision, released,
             restoreImplicitResumeRequest: implicitResume.restore,
             modelRetried,
             expectsImageGen: req.expectsImageGen,
             cookieJar, proxyPool,
           });
           if (errorRetryTransition.action === "respond") {
+            if (
+              errorRetryTransition.status === 429 &&
+              errorRetryTransition.details?.code === "ws_response_owner_unavailable"
+            ) {
+              c.header("Retry-After", "1");
+            }
             if (errorRetryTransition.attemptFallback) {
               return respondProxyErrorOrFallback(
                 options, req, fmt,
                 errorRetryTransition.status,
                 errorRetryTransition.message,
                 errorRetryTransition.useFormat429,
+                errorRetryTransition.details,
               );
             }
             return respondWithProxyError({
               c, req, fmt,
               status: errorRetryTransition.status,
               message: errorRetryTransition.message,
+              ...(errorRetryTransition.details
+                ? { details: errorRetryTransition.details }
+                : {}),
               ...(errorRetryTransition.useFormat429 ? { useFormat429: true } : {}),
             });
           }
@@ -524,6 +744,8 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
             earlyServerErrorRetried = true;
           }
           entryId = errorRetryTransition.entryId;
+          const nextToken = accountPool.getEntry(entryId)?.token;
+          if (nextToken) credentialGeneration = fingerprintCredential(nextToken);
           triedEntryIds.push(errorRetryTransition.entryId);
           codexApi = errorRetryTransition.api;
           await staggerIfNeeded(errorRetryTransition.prevSlotMs);

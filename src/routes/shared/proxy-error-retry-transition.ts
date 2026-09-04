@@ -18,6 +18,7 @@ export type ProxyErrorRetryTransitionResult =
        *  exhausted) — the proxy handler may then route through the fallback
        *  upstream apikey as a last resort. */
       attemptFallback?: true;
+      details?: import("./proxy-handler-types.js").ProxyErrorDetails;
     }
   | {
       action: "retry";
@@ -66,6 +67,7 @@ export function applyProxyErrorRetryTransition(
       action: "respond",
       status: decision.status,
       message: decision.message,
+      ...(decision.details ? { details: decision.details } : {}),
       modelRetried,
     };
   }
@@ -92,6 +94,7 @@ export function applyProxyErrorRetryTransition(
       status: fallbackRetry.status,
       message: fallbackRetry.message,
       ...(fallbackRetry.useFormat429 ? { useFormat429: true } : {}),
+      ...(decision.details ? { details: decision.details } : {}),
       attemptFallback: true,
       modelRetried: nextModelRetried,
     };

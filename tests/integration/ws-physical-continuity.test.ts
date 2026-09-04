@@ -78,7 +78,7 @@ describe("physical WebSocket response continuity", () => {
     item.socket.send(JSON.stringify({ type: "response.completed", response: { id: responseId } }));
   }
 
-  it("continues the newest response only on the owning physical connection", async () => {
+  it("retains branchable response IDs on their owning physical connection", async () => {
     let sequence = 0;
     onRequest = (item) => complete(item, `resp_${++sequence}`);
 
@@ -89,14 +89,16 @@ describe("physical WebSocket response continuity", () => {
     expect(connectionCount).toBe(1);
     expect(seen.map((item) => item.connection)).toEqual([1, 1]);
     expect(seen[1].payload.previous_response_id).toBe("resp_1");
-    expect(pool.ownerWsId("resp_1")).toBeNull();
+    expect(pool.ownerWsId("resp_1")).not.toBeNull();
     expect(pool.ownerWsId("resp_2")).not.toBeNull();
 
-    await expect(
-      createWebSocketResponse(url, {}, request("stale", "resp_1"), undefined, null, undefined, context()),
-    ).rejects.toBeInstanceOf(PreviousResponseWebSocketError);
+    await drain(await createWebSocketResponse(
+      url, {}, request("branch", "resp_1"), undefined, null, undefined, context(),
+    ));
     expect(connectionCount).toBe(1);
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(3);
+    expect(seen[2].connection).toBe(1);
+    expect(seen[2].payload.previous_response_id).toBe("resp_1");
   });
 
   it("fails closed when the owning connection is busy without opening a one-shot", async () => {
@@ -115,7 +117,11 @@ describe("physical WebSocket response continuity", () => {
 
     await expect(
       createWebSocketResponse(url, {}, request("concurrent", "resp_1"), undefined, null, undefined, context()),
-    ).rejects.toMatchObject({ name: "PreviousResponseWebSocketError" });
+    ).rejects.toMatchObject({
+      name: "PreviousResponseWebSocketError",
+      status: 409,
+      continuityReason: "busy",
+    });
     expect(connectionCount).toBe(1);
     expect(seen).toHaveLength(2);
     held.abort();
@@ -184,7 +190,11 @@ describe("physical WebSocket response continuity", () => {
 
     await expect(
       createWebSocketResponse(url, {}, request("after-death", "resp_1"), undefined, null, undefined, context()),
-    ).rejects.toBeInstanceOf(PreviousResponseWebSocketError);
+    ).rejects.toMatchObject({
+      name: "PreviousResponseWebSocketError",
+      status: 410,
+      continuityReason: "transport_closed",
+    });
     expect(connectionCount).toBe(1);
     expect(seen).toHaveLength(1);
   });

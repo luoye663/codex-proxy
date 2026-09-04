@@ -260,7 +260,29 @@ export type PreviousResponseContinuityReason =
   | "disabled"
   | "no_key"
   | "no_context"
-  | "transport";
+  | "transport"
+  | "transport_closed"
+  | "transport_error"
+  | "liveness_timeout"
+  | "response_start_timeout"
+  | "client_abort"
+  | "stream_cancelled"
+  | "max_age_expired"
+  | "process_shutdown"
+  | "account_removed"
+  | "account_disabled"
+  | "account_banned"
+  | "account_expired"
+  | "account_quota_exhausted"
+  | "fingerprint_changed"
+  | "response_failed"
+  | "response_cancelled"
+  | "upstream_previous_response_not_found"
+  | "connection_replaced"
+  | "server_connection_limit"
+  | "account_temporarily_unavailable"
+  | "account_concurrency_limit"
+  | "unknown_owner";
 
 /** previous_response_id can only continue on its owning physical WebSocket. */
 export class PreviousResponseWebSocketError extends CodexApiError {
@@ -268,13 +290,20 @@ export class PreviousResponseWebSocketError extends CodexApiError {
     public readonly causeMessage: string,
     public readonly continuityReason?: PreviousResponseContinuityReason,
   ) {
+    const busy = continuityReason === "busy";
+    const status = busy ? 409 : 410;
+    const code = busy ? "ws_response_owner_busy" : "ws_response_history_gone";
     super(
-      0,
+      status,
       JSON.stringify({
         error: {
+          type: "invalid_request_error",
+          code,
           message:
             "WebSocket failed while using previous_response_id; HTTP SSE fallback would drop server-side history: " +
             causeMessage,
+          continuity_reason: continuityReason ?? "unknown_owner",
+          retryable: busy,
         },
       }),
     );

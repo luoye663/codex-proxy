@@ -255,6 +255,7 @@ export class ResponsesWebSocketServer {
               message: "A response.create is already in progress on this connection",
             },
           }),
+          409,
         );
         return;
       }
@@ -314,7 +315,7 @@ export class ResponsesWebSocketServer {
     const contentType = response.headers.get("content-type") ?? "";
     if (!response.ok || !contentType.includes("text/event-stream")) {
       const textBody = await response.text();
-      this.sendErrorFrame(ws, textBody);
+      this.sendErrorFrame(ws, textBody, response.status);
       return;
     }
 
@@ -343,10 +344,12 @@ export class ResponsesWebSocketServer {
    * keeps the socket alive). All error payloads are normalized to
    * `{type:"error", error:{...}}` so clients can classify terminal errors.
    */
-  private sendErrorFrame(ws: WebSocket, rawMessage: string): void {
+  private sendErrorFrame(ws: WebSocket, rawMessage: string, status?: number): void {
     let errorType = "server_error";
     let code = "proxy_error";
     let message = rawMessage;
+    let continuityReason: string | undefined;
+    let retryable: boolean | undefined;
     try {
       const parsed = JSON.parse(rawMessage) as Record<string, unknown>;
       const errObj =
@@ -361,12 +364,23 @@ export class ResponsesWebSocketServer {
             : rawMessage;
       if (errObj && typeof errObj.type === "string") errorType = errObj.type;
       if (errObj && typeof errObj.code === "string") code = errObj.code;
+      if (errObj && typeof errObj.continuity_reason === "string") {
+        continuityReason = errObj.continuity_reason;
+      }
+      if (errObj && typeof errObj.retryable === "boolean") retryable = errObj.retryable;
     } catch {
       /* keep raw string */
     }
     const text = JSON.stringify({
       type: "error",
-      error: { type: errorType, code, message },
+      error: {
+        type: errorType,
+        code,
+        message,
+        ...(continuityReason ? { continuity_reason: continuityReason } : {}),
+        ...(retryable !== undefined ? { retryable } : {}),
+        ...(status !== undefined ? { status } : {}),
+      },
     });
     if (ws.readyState === WS_OPEN) {
       try {

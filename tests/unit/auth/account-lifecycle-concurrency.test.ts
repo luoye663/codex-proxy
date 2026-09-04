@@ -56,6 +56,15 @@ describe("per-account concurrent request slots", () => {
       const second = pool.acquire({});
       expect(second).not.toBeNull();
     });
+
+    it("requiredEntryId never rotates an explicit continuation to another account", () => {
+      const { pool, entryIds } = createPool(2);
+      const owner = pool.acquire({ requiredEntryId: entryIds[0] });
+      expect(owner?.entryId).toBe(entryIds[0]);
+
+      expect(pool.acquire({ requiredEntryId: entryIds[0] })).toBeNull();
+      expect(pool.acquire({ requiredEntryId: entryIds[1] })?.entryId).toBe(entryIds[1]);
+    });
   });
 
   describe("prevSlotMs", () => {

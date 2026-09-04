@@ -15,6 +15,8 @@ export interface ChunkTrace {
 
 function isTerminalStreamEvent(event: string): boolean {
   return event === "response.completed" ||
+    event === "response.incomplete" ||
+    event === "response.cancelled" ||
     event === "response.failed" ||
     event === "error" ||
     event === "message_stop" ||

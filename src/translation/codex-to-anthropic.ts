@@ -338,6 +338,7 @@ export async function* streamCodexToAnthropic(
         break;
       }
 
+      case "response.incomplete":
       case "response.completed": {
         if (evt.usage) {
           inputTokens = evt.usage.input_tokens;

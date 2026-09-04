@@ -1,5 +1,9 @@
 import { getWsPool } from "../../proxy/ws-pool.js";
 import type { WsConnectionPool } from "../../proxy/ws-pool.js";
+import type {
+  ResponseOwnerGoneReason,
+  ResponseOwnerLookup,
+} from "../../proxy/ws-pool.js";
 import type { WsPoolContext } from "../../proxy/codex-api.js";
 
 export interface BuildWsPoolContextOptions {
@@ -11,6 +15,8 @@ export interface BuildWsPoolContextOptions {
   tag: string;
   /** Distinguishes a continuity-recovery WS from a busy canonical chain. */
   poolKeySuffix?: string;
+  /** Opaque account-token generation captured by newly-opened connections. */
+  credentialGeneration?: string;
 }
 
 export interface BuildWsPoolContextDeps {
@@ -26,6 +32,20 @@ const defaultDeps: BuildWsPoolContextDeps = {
 /** Remove a response-to-physical-WS owner through the pool boundary. */
 export function forgetWsResponseOwner(responseId: string): void {
   getWsPool().forgetResponseOwner(responseId);
+}
+
+/** Read response ownership without coupling the proxy orchestrator to the
+ * singleton implementation. */
+export function lookupWsResponseOwner(responseId: string): ResponseOwnerLookup {
+  return getWsPool().lookupResponseOwner(responseId);
+}
+
+/** Evict only the lane owning one failed response chain. */
+export function evictWsResponseOwnerLane(
+  responseId: string,
+  reason: ResponseOwnerGoneReason,
+): void {
+  getWsPool().evictByResponseId(responseId, reason);
 }
 
 /** Build a per-request WS pool context only when the WS path has a stable chain id. */
@@ -49,6 +69,7 @@ export function buildWsPoolContext(
       options.poolKeySuffix,
     ].filter((part): part is string => Boolean(part)).join(":"),
     entryId,
+    credentialGeneration: options.credentialGeneration,
     onDecision: (decision) => {
       const ridShort = options.requestId.slice(0, 8);
       const wsTag = decision.kind === "bypass"

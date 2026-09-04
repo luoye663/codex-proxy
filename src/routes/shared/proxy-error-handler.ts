@@ -20,8 +20,10 @@ import {
   isModelNotSupportedError,
 } from "../../proxy/error-classification.js";
 import type { CodexApiError } from "../../proxy/codex-types.js";
+import { PreviousResponseWebSocketError } from "../../proxy/codex-types.js";
 import type { StatusCode } from "hono/utils/http-status";
 import type { CookieJar } from "../../proxy/cookie-jar.js";
+import type { ProxyErrorDetails } from "./proxy-handler-types.js";
 import { recordCfPathBlock } from "../../auth/cf-path-block-tracker.js";
 import { recordCfChallengeCooldown } from "../../auth/cf-challenge-cooldown.js";
 import { appendErrorLog } from "../../logs/error-log.js";
@@ -35,7 +37,7 @@ export function toErrorStatus(status: number): StatusCode {
 }
 
 export type ErrorAction =
-  | { action: "respond"; status: number; message: string }
+  | { action: "respond"; status: number; message: string; details?: ProxyErrorDetails }
   | {
       action: "retry";
       releaseBeforeRetry?: boolean;
@@ -46,6 +48,7 @@ export type ErrorAction =
       message: string;
       /** Use format429 instead of formatError for the fallback response. */
       useFormat429?: boolean;
+      details?: ProxyErrorDetails;
     };
 
 /**
@@ -72,6 +75,24 @@ export function handleCodexApiError(
   earlyServerErrorRetried = false,
 ): ErrorAction {
   const email = pool.getEntry(entryId)?.email ?? "?";
+
+  // A continuation is bound to one physical WebSocket. Busy is temporary;
+  // every other local owner loss is permanent for a delta-only request.
+  if (err instanceof PreviousResponseWebSocketError) {
+    return {
+      action: "respond",
+      status: err.continuityReason === "busy" ? 409 : 410,
+      message: err.message,
+      details: {
+        type: "invalid_request_error",
+        code: err.continuityReason === "busy"
+          ? "ws_response_owner_busy"
+          : "ws_response_history_gone",
+        continuityReason: err.continuityReason ?? "unknown_owner",
+        retryable: err.continuityReason === "busy",
+      },
+    };
+  }
 
   // 1. Model not supported on this account's plan
   if (isModelNotSupportedError(err)) {
@@ -103,6 +124,11 @@ export function handleCodexApiError(
       status: capacityExceeded ? 429 : 503,
       message: err.message,
       ...(capacityExceeded ? { useFormat429: true } : {}),
+      details: {
+        type: capacityExceeded ? "rate_limit_error" : "server_error",
+        code: capacityExceeded ? "ws_pool_capacity_exceeded" : "ws_pool_connection_unavailable",
+        retryable: true,
+      },
     };
   }
 

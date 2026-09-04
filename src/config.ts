@@ -121,6 +121,7 @@ export function reloadAllConfigs(configDir?: string): void {
       config.ws_pool.max_per_account,
       config.auth.max_concurrent_per_account,
     ),
+    ownerTombstoneTtlMs: config.ws_pool.owner_tombstone_ttl_ms,
   });
   console.log("[Config] Hot-reloaded config, fingerprint, and models from disk");
   // Re-merge backend models so hot-reload doesn't wipe them for ~1h

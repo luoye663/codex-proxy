@@ -337,6 +337,41 @@ describe("client-facing WebSocket on /v1/responses (issue #681)", () => {
     ws.close();
   });
 
+  it("preserves response-continuity diagnostics in an error frame", async () => {
+    const { handleProxyRequest } = await import("@src/routes/shared/proxy-handler.js");
+    const mock = handleProxyRequest as ReturnType<typeof vi.fn>;
+    mock.mockImplementationOnce(async () =>
+      new Response(
+        JSON.stringify({
+          type: "error",
+          error: {
+            message: "Owning WebSocket was closed",
+            type: "invalid_request_error",
+            code: "ws_response_history_gone",
+            continuity_reason: "transport_closed",
+            retryable: false,
+          },
+        }),
+        { status: 410, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const { ws } = await connectClient(port);
+    const received = receiveJsonFrames(ws, 1);
+    ws.send(RESPONSE_CREATE_BODY);
+    const [frame] = await received;
+    expect(frame).toMatchObject({
+      type: "error",
+      error: {
+        code: "ws_response_history_gone",
+        continuity_reason: "transport_closed",
+        retryable: false,
+        status: 410,
+      },
+    });
+    ws.close();
+  });
+
   it("rejects an upgrade with a disabled client key with 401 (validateAccess at handshake)", async () => {
     mockConfig.server.proxy_api_key = "master-key";
     const entry = clientKeyPool.createKey({ name: "disabled-key", key: "ck-disabled" });

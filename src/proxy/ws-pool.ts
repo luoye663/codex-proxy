@@ -30,8 +30,8 @@
  *   branch so its response can retain a physical owner for continuation.
  * - **No idle TTL**: kept open until natural death (server close / TCP RST →
  *   immediate evict), `max_age_ms` (55 min, leaves 5 min margin under the
- *   server's 60 min hard cap), or account state change (refresh / banned /
- *   disabled / rate-limited → cascade evict via `evictByEntryId`).
+ *   server's 60 min hard cap), or a permanent account/fingerprint change.
+ *   Token refresh and temporary rate limits preserve existing response owners.
  * - **Account slot decoupled**: WS lifecycle is independent of the
  *   account-pool acquire/release slot. `proxy-handler` releases the slot
  *   when the stream finishes; the WS stays in the pool for the next turn.
@@ -146,7 +146,11 @@ function classifyWsErrorEvent(msg: Record<string, unknown>): { status: number; c
 }
 
 function isTerminalWsEvent(type: string): boolean {
-  return type === "response.completed" || type === "response.failed" || type === "error";
+  return type === "response.completed" ||
+    type === "response.incomplete" ||
+    type === "response.cancelled" ||
+    type === "response.failed" ||
+    type === "error";
 }
 
 function isEarlyMetadataWsEvent(type: string): boolean {
@@ -156,8 +160,7 @@ function isEarlyMetadataWsEvent(type: string): boolean {
     type === "codex.response.metadata";
 }
 
-function completedResponseId(msg: Record<string, unknown>, type: string): string | null {
-  if (type !== "response.completed") return null;
+function responseIdFromEvent(msg: Record<string, unknown>): string | null {
   const response = typeof msg.response === "object" && msg.response !== null
     ? msg.response as Record<string, unknown>
     : null;
@@ -165,15 +168,79 @@ function completedResponseId(msg: Record<string, unknown>, type: string): string
   return typeof id === "string" && id.length > 0 ? id : null;
 }
 
+export type ResponseOwnerState = "provisional" | "active";
+
+export type ResponseOwnerGoneReason =
+  | "transport_closed"
+  | "transport_error"
+  | "liveness_timeout"
+  | "response_start_timeout"
+  | "client_abort"
+  | "stream_cancelled"
+  | "max_age_expired"
+  | "process_shutdown"
+  | "account_removed"
+  | "account_disabled"
+  | "account_banned"
+  | "account_expired"
+  | "account_quota_exhausted"
+  | "fingerprint_changed"
+  | "response_failed"
+  | "response_cancelled"
+  | "upstream_previous_response_not_found"
+  | "connection_replaced"
+  | "server_connection_limit"
+  | "unknown_owner";
+
+export interface ResponseOwnerTombstone {
+  reason: ResponseOwnerGoneReason;
+  entryId: string;
+  wsId: string;
+  goneAt: number;
+}
+
+export type ResponseOwnerLookup =
+  | {
+      kind: "live";
+      entryId: string;
+      wsId: string;
+      state: ResponseOwnerState;
+      credentialGeneration?: string;
+    }
+  | { kind: "gone"; tombstone: ResponseOwnerTombstone }
+  | { kind: "unknown" };
+
+function ownerGoneReasonFromDeadReason(reason: string): ResponseOwnerGoneReason {
+  if (reason.startsWith("liveness timeout")) return "liveness_timeout";
+  if (reason.startsWith("response start timeout")) return "response_start_timeout";
+  if (reason.startsWith("transport error")) return "transport_error";
+  if (reason.startsWith("closed code=")) return "transport_closed";
+  if (reason === "aborted" || reason === "aborted before send") return "client_abort";
+  if (reason === "stream cancelled by caller") return "stream_cancelled";
+  if (reason === "max age expired") return "max_age_expired";
+  if (reason === "process shutdown") return "process_shutdown";
+  if (reason === "account removed") return "account_removed";
+  if (reason === "account disabled") return "account_disabled";
+  if (reason === "account banned") return "account_banned";
+  if (reason === "account expired") return "account_expired";
+  if (reason === "account quota exhausted") return "account_quota_exhausted";
+  if (reason === "fingerprint changed") return "fingerprint_changed";
+  if (reason === "response failed") return "response_failed";
+  if (reason === "response cancelled") return "response_cancelled";
+  if (reason === "server connection limit") return "server_connection_limit";
+  return "connection_replaced";
+}
+
 // ── PersistentWs ───────────────────────────────────────────────────
 
 export interface PersistentWsHooks {
   /** Called when this WS becomes unusable (close, error, eviction).
    *  The pool uses this to remove the entry and all response owners. */
-  onDead(): void;
-  /** Called only after a response.completed frame establishes the newest
-   *  connection-local previous-response anchor. */
-  onResponseCompleted?(responseId: string): void;
+  onDead(reason: string): void;
+  /** Track IDs from their first server event through terminal success. */
+  onResponseOwner?(responseId: string, state: ResponseOwnerState): void;
+  /** Terminal response failures invalidate only their own ID. */
+  onResponseGone?(responseId: string, reason: ResponseOwnerGoneReason): void;
 }
 
 /** Default keepalive cadence. 25s sits comfortably under the typical 30-60s
@@ -196,6 +263,7 @@ export class PersistentWs {
   readonly id: string;
   readonly entryId: string;
   readonly poolKey: string;
+  readonly credentialGeneration: string | undefined;
 
   private ws: WsLike;
   private busy = false;
@@ -203,6 +271,7 @@ export class PersistentWs {
   private readonly createdAt: number;
   private readonly now: () => number;
   private pendingClose = false;
+  private pendingCloseReason = "connection replaced";
   private dead = false;
   private upgradeHeaders: Record<string, string | string[]> = {};
   private hooks: PersistentWsHooks;
@@ -226,11 +295,14 @@ export class PersistentWs {
      *  0 disables the liveness check entirely. Omit to default to
      *  {@link DEFAULT_LIVENESS_TIMEOUT_MULTIPLIER} × pingIntervalMs. */
     livenessTimeoutMs?: number;
+    /** Opaque token generation captured at handshake. Never logged. */
+    credentialGeneration?: string;
   }) {
     this.id = randomUUID().slice(0, 8);
     this.ws = opts.ws;
     this.entryId = opts.entryId;
     this.poolKey = opts.poolKey;
+    this.credentialGeneration = opts.credentialGeneration;
     this.hooks = opts.hooks;
     this.now = opts.now ?? Date.now;
     this.createdAt = this.now();
@@ -385,10 +457,11 @@ export class PersistentWs {
 
   /** Mark this WS for graceful close. If busy, defer until the in-flight
    *  request completes; otherwise close immediately. */
-  closeGracefully(): void {
+  closeGracefully(reason = "connection replaced"): void {
     this.pendingClose = true;
+    this.pendingCloseReason = reason;
     if (!this.busy) {
-      this.markDead("closeGracefully");
+      this.markDead(reason);
     }
   }
 
@@ -411,7 +484,7 @@ export class PersistentWs {
     this.detachAbortListener();
     this.busy = false;
     this.currentSession = null;
-    try { this.hooks.onDead(); } catch { /* hook errors must not propagate */ }
+    try { this.hooks.onDead(reason); } catch { /* hook errors must not propagate */ }
   }
 
   private handleResponseStartTimeout(timeoutMs: number): void {
@@ -482,6 +555,26 @@ export class PersistentWs {
       return;
     }
 
+    if (msg) {
+      const responseId = responseIdFromEvent(msg);
+      if (responseId) {
+        if (
+          type === "response.created" ||
+          type === "response.in_progress" ||
+          type === "response.queued"
+        ) {
+          this.hooks.onResponseOwner?.(responseId, "provisional");
+        } else if (type === "response.completed" || type === "response.incomplete") {
+          this.hooks.onResponseOwner?.(responseId, "active");
+        } else if (type === "response.failed" || type === "response.cancelled") {
+          this.hooks.onResponseGone?.(
+            responseId,
+            type === "response.cancelled" ? "response_cancelled" : "response_failed",
+          );
+        }
+      }
+    }
+
     if (!sess.earlyDecisionMade) {
       if (msg) {
         const classified = classifyWsErrorEvent(msg);
@@ -511,8 +604,6 @@ export class PersistentWs {
 
       if (isTerminalWsEvent(type)) {
         sess.sawTerminalEvent = true;
-        const responseId = completedResponseId(msg, type);
-        if (responseId) this.hooks.onResponseCompleted?.(responseId);
         queueMicrotask(() => this.releaseAfterTerminalFrame());
       }
     } else {
@@ -589,7 +680,7 @@ export class PersistentWs {
     this.detachAbortListener();
     this.currentSession = null;
     this.busy = false;
-    if (this.pendingClose) this.markDead("pending close after terminal frame");
+    if (this.pendingClose) this.markDead(this.pendingCloseReason);
   }
 
   /** Early classified error already rejected the send-level promise. The
@@ -601,7 +692,7 @@ export class PersistentWs {
     this.detachAbortListener();
     this.currentSession = null;
     this.busy = false;
-    if (this.pendingClose) this.markDead("pending close after early error");
+    if (this.pendingClose) this.markDead(this.pendingCloseReason);
   }
 }
 
@@ -611,13 +702,17 @@ export interface WsPoolConfig {
   enabled: boolean;
   maxAgeMs: number;
   maxPerAccount: number;
+  ownerTombstoneTtlMs: number;
 }
 
 export const DEFAULT_WS_POOL_CONFIG: WsPoolConfig = {
   enabled: true,
   maxAgeMs: 3_300_000, // 55 minutes (under server's 60-min hard cap). Mirrored in `IMPLICIT_RESUME_MAX_AGE_MS` (proxy-session-helpers.ts) — keep them in sync.
   maxPerAccount: 8,
+  ownerTombstoneTtlMs: 86_400_000,
 };
+
+const MAX_OWNER_TOMBSTONES = 100_000;
 
 export interface AcquireResult {
   ws: PersistentWs;
@@ -642,6 +737,7 @@ export type ResponseOwnerBypassReason = Exclude<AcquireBypassReason, "cap">;
 
 export interface ResponseOwnerBypass {
   bypass: ResponseOwnerBypassReason;
+  tombstone?: ResponseOwnerTombstone;
 }
 
 export interface PersistentWsFactory {
@@ -657,8 +753,11 @@ export class WsConnectionPool {
   private readonly pendingCreatesByEntry = new Map<string, number>();
   /** Response IDs are valid only on the physical WS that completed them. */
   private readonly ownerByResponse = new Map<string, string>();
-  /** The upstream keeps only the most recent response per physical WS. */
-  private readonly responseByPoolKey = new Map<string, string>();
+  /** A live physical lane may own multiple branchable response IDs. */
+  private readonly responsesByPoolKey = new Map<string, Set<string>>();
+  private readonly ownerStateByResponse = new Map<string, ResponseOwnerState>();
+  /** Recently-lost owners retain their cause for actionable errors. */
+  private readonly ownerTombstones = new Map<string, ResponseOwnerTombstone>();
   /** Max age is captured when a connection enters the pool so a hot config
    *  update never invalidates an already-issued response owner. */
   private readonly maxAgeByPoolKey = new Map<string, number>();
@@ -702,8 +801,12 @@ export class WsConnectionPool {
 
     let existing = this.map.get(poolKey);
     if (existing && (!existing.isAlive() || existing.isExpired(this.maxAgeFor(poolKey)))) {
-      existing.closeGracefully();
-      this.removeEntry(existing);
+      const expired = existing.isExpired(this.maxAgeFor(poolKey));
+      this.detachAndClose(
+        existing,
+        expired ? "max_age_expired" : "connection_replaced",
+        expired ? "max age expired" : "connection replaced",
+      );
       existing = undefined;
     }
     if (existing) {
@@ -729,16 +832,27 @@ export class WsConnectionPool {
         entryId,
         poolKey,
         hooks: {
-          onDead: () => {
+          onDead: (reason) => {
             // A same-key connection may have won the factory race. Never let a
             // discarded fresh connection remove that winner from the pool.
             if (freshRef && this.map.get(poolKey) === freshRef) {
-              this.removeEntryByKey(poolKey);
+              this.removeEntryByKey(poolKey, ownerGoneReasonFromDeadReason(reason));
             }
           },
-          onResponseCompleted: (responseId) => {
+          onResponseOwner: (responseId, state) => {
             if (freshRef && this.map.get(poolKey) === freshRef) {
-              this.registerResponseOwner(poolKey, responseId);
+              this.registerResponseOwner(poolKey, responseId, state);
+            }
+          },
+          onResponseGone: (responseId, reason) => {
+            if (freshRef && this.map.get(poolKey) === freshRef) {
+              // Some upstream failures/cancellations arrive without a prior
+              // response.created frame. Briefly register the physical lane so
+              // forgetResponseOwner can still preserve a reason tombstone.
+              if (!this.ownerByResponse.has(responseId)) {
+                this.registerResponseOwner(poolKey, responseId, "provisional");
+              }
+              this.forgetResponseOwner(responseId, reason);
             }
           },
         },
@@ -753,7 +867,7 @@ export class WsConnectionPool {
     const racer = this.map.get(poolKey);
     if (racer) {
       // Discard the freshly-created ws — close it cleanly.
-      fresh.closeGracefully();
+      fresh.closeGracefully("connection replaced");
       if (racer.isAlive() && racer.tryAcquire()) {
         return { ws: racer, reused: true };
       }
@@ -764,7 +878,7 @@ export class WsConnectionPool {
     if (!fresh.tryAcquire()) {
       // Should be impossible (we just created it), but be defensive: don't
       // leave a permanently-busy entry in the map.
-      fresh.closeGracefully();
+      fresh.closeGracefully("connection replaced");
       return { bypass: "dead" };
     }
 
@@ -789,21 +903,24 @@ export class WsConnectionPool {
     if (!entryId || !previousResponseId) return { bypass: "no_key" };
 
     const poolKey = this.ownerByResponse.get(previousResponseId);
-    if (!poolKey) return { bypass: "missing_owner" };
+    if (!poolKey) {
+      const tombstone = this.getTombstone(previousResponseId);
+      return tombstone ? { bypass: "missing_owner", tombstone } : { bypass: "missing_owner" };
+    }
     const owner = this.map.get(poolKey);
     if (!owner) {
-      this.forgetResponseOwner(previousResponseId);
-      return { bypass: "missing_owner" };
+      this.forgetResponseOwner(previousResponseId, "transport_closed");
+      const tombstone = this.getTombstone(previousResponseId);
+      return tombstone ? { bypass: "missing_owner", tombstone } : { bypass: "missing_owner" };
     }
     if (owner.entryId !== entryId) return { bypass: "account_mismatch" };
     if (!owner.isAlive()) {
-      this.removeEntry(owner);
-      return { bypass: "dead" };
+      this.detachAndClose(owner, "transport_closed", "transport closed");
+      return { bypass: "dead", tombstone: this.getTombstone(previousResponseId) ?? undefined };
     }
     if (owner.isExpired(this.maxAgeFor(poolKey))) {
-      owner.closeGracefully();
-      this.removeEntry(owner);
-      return { bypass: "expired" };
+      this.detachAndClose(owner, "max_age_expired", "max age expired");
+      return { bypass: "expired", tombstone: this.getTombstone(previousResponseId) ?? undefined };
     }
     if (!owner.tryAcquire()) return { bypass: "busy" };
     return { ws: owner, reused: true };
@@ -816,30 +933,71 @@ export class WsConnectionPool {
   }
 
   /** Remove a stale response owner without evicting an otherwise healthy WS. */
-  forgetResponseOwner(previousResponseId: string): void {
+  forgetResponseOwner(
+    previousResponseId: string,
+    reason: ResponseOwnerGoneReason = "upstream_previous_response_not_found",
+  ): void {
     const poolKey = this.ownerByResponse.get(previousResponseId);
     if (!poolKey) return;
+    const owner = this.map.get(poolKey);
     this.ownerByResponse.delete(previousResponseId);
-    if (this.responseByPoolKey.get(poolKey) === previousResponseId) {
-      this.responseByPoolKey.delete(poolKey);
+    this.ownerStateByResponse.delete(previousResponseId);
+    const responseIds = this.responsesByPoolKey.get(poolKey);
+    responseIds?.delete(previousResponseId);
+    if (responseIds?.size === 0) this.responsesByPoolKey.delete(poolKey);
+    if (owner) {
+      this.addTombstone(previousResponseId, {
+        reason,
+        entryId: owner.entryId,
+        wsId: owner.id,
+        goneAt: Date.now(),
+      });
     }
   }
 
-  /** Evict every WS for the given entryId. Used when the account is
-   *  rate-limited / banned / disabled / refreshed (token rotated). */
-  evictByEntryId(entryId: string): void {
+  /** Resolve account affinity before account acquisition. This is deliberately
+   *  read-only: final liveness/busy validation remains atomic in
+   *  acquireForResponse(). */
+  lookupResponseOwner(previousResponseId: string): ResponseOwnerLookup {
+    const poolKey = this.ownerByResponse.get(previousResponseId);
+    const owner = poolKey ? this.map.get(poolKey) : undefined;
+    if (poolKey && owner) {
+      return {
+        kind: "live",
+        entryId: owner.entryId,
+        wsId: owner.id,
+        state: this.ownerStateByResponse.get(previousResponseId) ?? "active",
+        ...(owner.credentialGeneration
+          ? { credentialGeneration: owner.credentialGeneration }
+          : {}),
+      };
+    }
+    const tombstone = this.getTombstone(previousResponseId);
+    return tombstone ? { kind: "gone", tombstone } : { kind: "unknown" };
+  }
+
+  /** Evict every WS for an entry after a permanent account transition. */
+  evictByEntryId(entryId: string, reason: ResponseOwnerGoneReason = "account_disabled"): void {
     const keys = this.byEntry.get(entryId);
     if (!keys) return;
     // Snapshot keys before iteration — closeGracefully → onDead → removeEntryByKey
     // would mutate the set we're iterating.
     for (const key of [...keys]) {
       const ws = this.map.get(key);
-      if (ws) ws.closeGracefully();
+      if (ws) this.detachAndClose(ws, reason, reason.replaceAll("_", " "));
     }
-    // closeGracefully on a busy ws sets pendingClose; the actual map removal
-    // happens when the in-flight request completes. Force-clear the byEntry
-    // index now so subsequent acquires don't count against the cap.
-    this.byEntry.delete(entryId);
+  }
+
+  /** Evict only the physical lane that owns the poisoned response. */
+  evictByResponseId(responseId: string, reason: ResponseOwnerGoneReason): void {
+    const poolKey = this.ownerByResponse.get(responseId);
+    const tombstoneWsId = poolKey ? undefined : this.getTombstone(responseId)?.wsId;
+    const ws = poolKey
+      ? this.map.get(poolKey)
+      : tombstoneWsId
+        ? [...this.map.values()].find((candidate) => candidate.id === tombstoneWsId)
+        : undefined;
+    if (ws) this.detachAndClose(ws, reason, reason.replaceAll("_", " "));
   }
 
   /** Returns the number of pooled connections for `entryId`. Test helper. */
@@ -878,7 +1036,7 @@ export class WsConnectionPool {
       this.gcInterval = undefined;
     }
     for (const ws of [...this.map.values()]) {
-      ws.closeGracefully();
+      this.detachAndClose(ws, "process_shutdown", "process shutdown");
     }
     // Leave map empty after all entries are forcibly closed; subsequent
     // acquires would fail the disabled check anyway.
@@ -886,7 +1044,8 @@ export class WsConnectionPool {
     this.byEntry.clear();
     this.pendingCreatesByEntry.clear();
     this.ownerByResponse.clear();
-    this.responseByPoolKey.clear();
+    this.responsesByPoolKey.clear();
+    this.ownerStateByResponse.clear();
     this.maxAgeByPoolKey.clear();
   }
 
@@ -895,9 +1054,15 @@ export class WsConnectionPool {
     for (const [, ws] of this.map) {
       if (ws.isBusy()) continue;
       if (!ws.isAlive() || ws.isExpired(this.maxAgeFor(ws.poolKey))) {
-        ws.closeGracefully();
+        const expired = ws.isExpired(this.maxAgeFor(ws.poolKey));
+        this.detachAndClose(
+          ws,
+          expired ? "max_age_expired" : "connection_replaced",
+          expired ? "max age expired" : "connection replaced",
+        );
       }
     }
+    this.cleanupTombstones();
   }
 
   private releasePendingCreate(entryId: string): void {
@@ -913,36 +1078,92 @@ export class WsConnectionPool {
     return this.maxAgeByPoolKey.get(poolKey) ?? this.config.maxAgeMs;
   }
 
-  private registerResponseOwner(poolKey: string, responseId: string): void {
+  private registerResponseOwner(poolKey: string, responseId: string, state: ResponseOwnerState): void {
     if (!this.map.has(poolKey)) return;
-    const previous = this.responseByPoolKey.get(poolKey);
-    if (previous && previous !== responseId) this.ownerByResponse.delete(previous);
     const previousPoolKey = this.ownerByResponse.get(responseId);
     if (previousPoolKey && previousPoolKey !== poolKey) {
-      this.responseByPoolKey.delete(previousPoolKey);
+      const previousIds = this.responsesByPoolKey.get(previousPoolKey);
+      previousIds?.delete(responseId);
+      if (previousIds?.size === 0) this.responsesByPoolKey.delete(previousPoolKey);
     }
-    this.responseByPoolKey.set(poolKey, responseId);
+    let responseIds = this.responsesByPoolKey.get(poolKey);
+    if (!responseIds) {
+      responseIds = new Set();
+      this.responsesByPoolKey.set(poolKey, responseIds);
+    }
+    responseIds.add(responseId);
     this.ownerByResponse.set(responseId, poolKey);
+    this.ownerStateByResponse.set(responseId, state);
+    this.ownerTombstones.delete(responseId);
   }
 
-  private removeEntry(ws: PersistentWs): void {
-    this.removeEntryByKey(ws.poolKey);
+  private removeEntry(ws: PersistentWs, reason: ResponseOwnerGoneReason): void {
+    this.removeEntryByKey(ws.poolKey, reason);
   }
 
-  private removeEntryByKey(poolKey: string): void {
+  /** Remove routing state before requesting a physical close. Busy sockets
+   *  close after their current frame sequence, but their old response IDs
+   *  must never resolve through a replacement that reuses the same pool key. */
+  private detachAndClose(
+    ws: PersistentWs,
+    reason: ResponseOwnerGoneReason,
+    closeReason: string,
+  ): void {
+    this.removeEntry(ws, reason);
+    ws.closeGracefully(closeReason);
+  }
+
+  private removeEntryByKey(poolKey: string, reason: ResponseOwnerGoneReason): void {
     const ws = this.map.get(poolKey);
     if (!ws) return;
     this.map.delete(poolKey);
     this.maxAgeByPoolKey.delete(poolKey);
-    const ownedResponse = this.responseByPoolKey.get(poolKey);
-    if (ownedResponse) {
-      this.responseByPoolKey.delete(poolKey);
-      this.ownerByResponse.delete(ownedResponse);
+    const ownedResponses = this.responsesByPoolKey.get(poolKey);
+    if (ownedResponses) {
+      this.responsesByPoolKey.delete(poolKey);
+      for (const responseId of ownedResponses) {
+        this.ownerByResponse.delete(responseId);
+        this.ownerStateByResponse.delete(responseId);
+        this.addTombstone(responseId, {
+          reason,
+          entryId: ws.entryId,
+          wsId: ws.id,
+          goneAt: Date.now(),
+        });
+      }
     }
     const entryKeys = this.byEntry.get(ws.entryId);
     if (entryKeys) {
       entryKeys.delete(poolKey);
       if (entryKeys.size === 0) this.byEntry.delete(ws.entryId);
+    }
+  }
+
+  private addTombstone(responseId: string, tombstone: ResponseOwnerTombstone): void {
+    this.ownerTombstones.delete(responseId);
+    this.ownerTombstones.set(responseId, tombstone);
+    this.cleanupTombstones();
+    while (this.ownerTombstones.size > MAX_OWNER_TOMBSTONES) {
+      const oldest = this.ownerTombstones.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.ownerTombstones.delete(oldest);
+    }
+  }
+
+  private getTombstone(responseId: string): ResponseOwnerTombstone | null {
+    const tombstone = this.ownerTombstones.get(responseId);
+    if (!tombstone) return null;
+    if (Date.now() - tombstone.goneAt > this.config.ownerTombstoneTtlMs) {
+      this.ownerTombstones.delete(responseId);
+      return null;
+    }
+    return tombstone;
+  }
+
+  private cleanupTombstones(): void {
+    const cutoff = Date.now() - this.config.ownerTombstoneTtlMs;
+    for (const [responseId, tombstone] of this.ownerTombstones) {
+      if (tombstone.goneAt < cutoff) this.ownerTombstones.delete(responseId);
     }
   }
 }

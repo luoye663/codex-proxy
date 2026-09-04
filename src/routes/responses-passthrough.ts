@@ -14,6 +14,7 @@ import { extractCodexError } from "../types/codex-events.js";
 import { recordStreamCloseEvent } from "../logs/stream-close-event.js";
 import type {
   FormatAdapter,
+  ProxyErrorDetails,
   ResponseMetadata,
   StreamTranslatorContext,
 } from "./shared/proxy-handler-types.js";
@@ -57,10 +58,20 @@ interface ResponsesStreamError {
   type: string;
   code: string;
   message: string;
+  continuity_reason?: string;
+  retryable?: boolean;
 }
 
 function isTerminalResponsesEvent(event: string): boolean {
-  return event === "response.completed" || event === "response.failed" || event === "error";
+  return event === "response.completed" ||
+    event === "response.incomplete" ||
+    event === "response.cancelled" ||
+    event === "response.failed" ||
+    event === "error";
+}
+
+function isContinuableResponsesEvent(event: string): boolean {
+  return event === "response.completed" || event === "response.incomplete";
 }
 
 function extractResponseIdFromEventData(data: unknown): string | null {
@@ -94,8 +105,21 @@ function stripCodexErrorPrefix(message: string): string {
   return message.replace(/^Codex API error \(\d+\):\s*/, "");
 }
 
-function classifyResponsesStreamError(status: number, message: string): ResponsesStreamError {
+function classifyResponsesStreamError(
+  status: number,
+  message: string,
+  details?: ProxyErrorDetails,
+): ResponsesStreamError {
   const cleanMessage = stripCodexErrorPrefix(message);
+  if (details?.code) {
+    return {
+      type: details.type ?? "invalid_request_error",
+      code: details.code,
+      message: cleanMessage,
+      ...(details.continuityReason ? { continuity_reason: details.continuityReason } : {}),
+      ...(details.retryable !== undefined ? { retryable: details.retryable } : {}),
+    };
+  }
   if (status === 429) {
     return {
       type: "rate_limit_error",
@@ -124,8 +148,12 @@ function classifyResponsesStreamError(status: number, message: string): Response
   };
 }
 
-export function buildResponsesStreamError(status: number, message: string): string {
-  return buildResponseFailedEvent(null, classifyResponsesStreamError(status, message));
+export function buildResponsesStreamError(
+  status: number,
+  message: string,
+  details?: ProxyErrorDetails,
+): string {
+  return buildResponseFailedEvent(null, classifyResponsesStreamError(status, message, details));
 }
 
 // ── Usage extraction ──────────────────────────────────────────────
@@ -260,7 +288,7 @@ export async function* streamPassthrough(
         }
       }
 
-      if (tupleTextBuffer !== null && tupleSchema && raw.event === "response.completed") {
+      if (tupleTextBuffer !== null && tupleSchema && isContinuableResponsesEvent(raw.event)) {
         if (tupleTextBuffer) {
           let reconvertedText = tupleTextBuffer;
           try {
@@ -313,18 +341,19 @@ export async function* streamPassthrough(
 
       if (
         raw.event === "response.created" ||
+        raw.event === "response.queued" ||
         raw.event === "response.in_progress" ||
-        raw.event === "response.completed"
+        isContinuableResponsesEvent(raw.event)
       ) {
         const data = raw.data;
         if (isRecord(data) && isRecord(data.response)) {
           const resp = data.response;
           if (typeof resp.id === "string") onResponseId(resp.id);
-          if (raw.event === "response.completed" && isRecord(resp.usage)) {
+          if (isContinuableResponsesEvent(raw.event) && isRecord(resp.usage)) {
             const imgUsage = extractImageGenUsage(resp);
             onUsage({ ...extractResponseUsage(resp.usage), ...(imgUsage ?? {}) });
           }
-          if (raw.event === "response.completed") {
+          if (isContinuableResponsesEvent(raw.event)) {
             if (Array.isArray(resp.output)) {
               appendReplayArtifacts(streamReplayItems, resp.output);
             }
@@ -395,7 +424,11 @@ export async function collectPassthrough(
       if (!isRecord(data)) continue;
       const resp = isRecord(data.response) ? data.response : null;
 
-      if (raw.event === "response.created" || raw.event === "response.in_progress") {
+      if (
+        raw.event === "response.created" ||
+        raw.event === "response.queued" ||
+        raw.event === "response.in_progress"
+      ) {
         if (resp && typeof resp.id === "string") responseId = resp.id;
       }
 
@@ -414,7 +447,7 @@ export async function collectPassthrough(
         }
       }
 
-      if (raw.event === "response.completed" && resp) {
+      if (isContinuableResponsesEvent(raw.event) && resp) {
         if (Array.isArray(resp.output)) {
           appendReplayArtifacts(collectReplayItems, resp.output);
         }
@@ -448,7 +481,11 @@ export async function collectPassthrough(
         }
       }
 
-      if (raw.event === "error" || raw.event === "response.failed") {
+      if (
+        raw.event === "error" ||
+        raw.event === "response.failed" ||
+        raw.event === "response.cancelled"
+      ) {
         if (containsInvalidEncryptedContentSignal(data)) {
           onResponseMetadata?.({ invalidReasoningReplay: true });
         }
@@ -518,15 +555,17 @@ export const PASSTHROUGH_FORMAT: FormatAdapter = {
       message: msg,
     },
   }),
-  formatError: (_status, msg) => ({
+  formatError: (status, msg, details) => ({
     type: "error",
     error: {
-      type: "server_error",
-      code: "codex_api_error",
+      type: details?.type ?? (status >= 400 && status < 500 ? "invalid_request_error" : "server_error"),
+      code: details?.code ?? "codex_api_error",
       message: msg,
+      ...(details?.continuityReason ? { continuity_reason: details.continuityReason } : {}),
+      ...(details?.retryable !== undefined ? { retryable: details.retryable } : {}),
     },
   }),
-  formatStreamError: (status, msg) => buildResponsesStreamError(status, msg),
+  formatStreamError: (status, msg, details) => buildResponsesStreamError(status, msg, details),
   streamTranslator: ({ api, response, model, onUsage, onResponseId, onResponseCompleted, tupleSchema, streamContext, onResponseMetadata }) =>
     streamPassthrough(api, response, model, onUsage, onResponseId, tupleSchema, streamContext, onResponseCompleted, onResponseMetadata),
   collectTranslator: ({ api, response, model, tupleSchema, onResponseMetadata }) =>

@@ -203,21 +203,26 @@ export function handleStreaming(options: HandleStreamingOptions): Response {
         // silent close, an upstream terminal error/response.failed frame, or a
         // transport exception — leaves the prev id chain poisoned: the
         // client's retry would resend the same delta against the same dead
-        // prev id and loop. The pooled WS may also keep rehashing to the same
-        // bad backend. Drop both so the retry does a full-input replay over a
-        // fresh connection instead.
+        // prev id and loop. Drop only the physical lane involved in this
+        // failure: account-wide eviction would destroy unrelated response
+        // owners and manufacture false missing_owner errors.
         const cause = metadataCollector.terminalFailure
           ? "terminal failure frame"
           : metadataCollector.prematureClose
             ? "premature close"
             : "stream ended without response.completed";
         const dropped = affinityMap.forgetConversation(conversationId, variantHash);
-        getWsPool().evictByEntryId(capturedEntryId);
+        const poisonedResponseId = capturedResponseId
+          ?? req.codexRequest.previous_response_id
+          ?? null;
+        if (poisonedResponseId) {
+          getWsPool().evictByResponseId(poisonedResponseId, "response_failed");
+        }
         console.warn(
           `[implicit-resume-poison] rid=${requestId.slice(0, 8)} tag=${fmt.tag} model=${req.model}` +
             ` ${cause} on resumed stream — dropped ${dropped} affinity entries` +
             ` conv=${conversationId.slice(0, 8)} vh=${variantHash.slice(0, 12)}` +
-            ` and evicted pooled WS for entry=${capturedEntryId.slice(0, 8)};` +
+            ` and evicted only response lane=${poisonedResponseId ?? "unknown"};` +
             ` next retry will replay full input on a fresh connection`,
         );
       }

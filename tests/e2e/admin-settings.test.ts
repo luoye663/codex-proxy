@@ -39,7 +39,12 @@ const mockConfig = {
     max_concurrent_per_account: 3 as number | null,
     request_interval_ms: 50 as number | null,
   },
-  ws_pool: { enabled: true, max_age_ms: 3_300_000, max_per_account: 8 },
+  ws_pool: {
+    enabled: true,
+    max_age_ms: 3_300_000,
+    max_per_account: 8,
+    owner_tombstone_ttl_ms: 86_400_000,
+  },
   update: { auto_update: true, auto_download: false, show_update_dialog: false, allow_prerelease: false },
   logs: { enabled: false, capacity: 2000, capture_body: false, llm_only: true },
   usage_stats: { history_retention_days: null as number | null, credits_per_usd: 25 },
@@ -208,6 +213,7 @@ describe("GET /admin/general-settings", () => {
       ws_pool_enabled: true,
       ws_pool_max_per_account: 8,
       ws_pool_max_age_ms: 3_300_000,
+      ws_pool_owner_tombstone_ttl_ms: 86_400_000,
       ws_pool_effective_max_per_account: 8,
     });
     expect(body).toHaveProperty("logs_enabled");

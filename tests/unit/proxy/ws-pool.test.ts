@@ -766,7 +766,10 @@ describe("WsConnectionPool", () => {
       await nextTick();
 
       now = 11;
-      expect(agingPool.acquireForResponse("entry-A", "resp_fresh")).toEqual({ bypass: "expired" });
+      expect(agingPool.acquireForResponse("entry-A", "resp_fresh")).toMatchObject({
+        bypass: "expired",
+        tombstone: { reason: "max_age_expired", entryId: "entry-A" },
+      });
       expect(agingPool.acquireForResponse("entry-A", "resp_old")).toMatchObject({ reused: true });
     } finally {
       await agingPool.shutdown();
@@ -860,7 +863,7 @@ describe("WsConnectionPool", () => {
     expect(factory).toHaveBeenCalledTimes(2);
   });
 
-  it("registers a response owner only after response.completed", async () => {
+  it("registers a provisional response owner at response.created", async () => {
     const { factory, created } = makeFactory();
     const acquired = await pool.acquire("entry-A", "entry-A:conv-1:variant-A", factory);
     if (!("ws" in acquired)) throw new Error("expected acquire success");
@@ -872,13 +875,21 @@ describe("WsConnectionPool", () => {
     });
     const mock = created[0]["ws"] as unknown as MockWs;
     mock.pushMessage({ type: "response.created", response: { id: "resp_A" } });
-    expect(pool.ownerWsId("resp_A")).toBeNull();
+    expect(pool.ownerWsId("resp_A")).toBe(acquired.ws.id);
+    expect(pool.lookupResponseOwner("resp_A")).toMatchObject({
+      kind: "live",
+      state: "provisional",
+    });
     mock.pushMessage({ type: "response.completed", response: { id: "resp_A" } });
     await send;
     expect(pool.ownerWsId("resp_A")).toBe(acquired.ws.id);
+    expect(pool.lookupResponseOwner("resp_A")).toMatchObject({
+      kind: "live",
+      state: "active",
+    });
   });
 
-  it("keeps only the most recent response owner per physical WS", async () => {
+  it("retains every response owner on a branchable physical WS", async () => {
     const { factory, created } = makeFactory();
     const first = await pool.acquire("entry-A", "entry-A:conv-1:variant-A", factory);
     if (!("ws" in first)) throw new Error("expected acquire success");
@@ -904,8 +915,122 @@ describe("WsConnectionPool", () => {
     mock.pushMessage({ type: "response.completed", response: { id: "resp_B" } });
     await secondSend;
 
-    expect(pool.ownerWsId("resp_A")).toBeNull();
+    expect(pool.ownerWsId("resp_A")).toBe(second.ws.id);
     expect(pool.ownerWsId("resp_B")).toBe(second.ws.id);
+  });
+
+  it("keeps a response owner through response.incomplete", async () => {
+    const { factory, created } = makeFactory();
+    const acquired = await pool.acquire("entry-A", "entry-A:conv-incomplete", factory);
+    if (!("ws" in acquired)) throw new Error("expected acquire success");
+    const sent = acquired.ws.send({
+      request: { type: "response.create", model: "m", instructions: "", input: [] },
+      signal: undefined,
+      onRateLimits: undefined,
+      reused: false,
+    });
+    const mock = created[0]["ws"] as unknown as MockWs;
+    mock.pushMessage({ type: "response.created", response: { id: "resp_incomplete" } });
+    mock.pushMessage({ type: "response.incomplete", response: { id: "resp_incomplete" } });
+    await sent;
+    await nextTick();
+
+    expect(pool.lookupResponseOwner("resp_incomplete")).toMatchObject({
+      kind: "live",
+      state: "active",
+      entryId: "entry-A",
+    });
+  });
+
+  it("records a granular tombstone when a provisional owner transport dies", async () => {
+    const { factory, created } = makeFactory();
+    const acquired = await pool.acquire("entry-A", "entry-A:conv-provisional", factory);
+    if (!("ws" in acquired)) throw new Error("expected acquire success");
+    const sent = acquired.ws.send({
+      request: { type: "response.create", model: "m", instructions: "", input: [] },
+      signal: undefined,
+      onRateLimits: undefined,
+      reused: false,
+    });
+    void sent.catch(() => undefined);
+    const mock = created[0]["ws"] as unknown as MockWs;
+    mock.pushMessage({ type: "response.created", response: { id: "resp_provisional" } });
+    mock.pushClose(1006, "tcp reset");
+    await nextTick();
+
+    expect(pool.lookupResponseOwner("resp_provisional")).toMatchObject({
+      kind: "gone",
+      tombstone: { reason: "transport_closed", entryId: "entry-A" },
+    });
+  });
+
+  it("records a failure tombstone when response.failed is the first frame", async () => {
+    const { factory, created } = makeFactory();
+    const acquired = await pool.acquire("entry-A", "entry-A:conv-first-failure", factory);
+    if (!("ws" in acquired)) throw new Error("expected acquire success");
+    const sent = acquired.ws.send({
+      request: { type: "response.create", model: "m", instructions: "", input: [] },
+      signal: undefined,
+      onRateLimits: undefined,
+      reused: false,
+    });
+    const mock = created[0]["ws"] as unknown as MockWs;
+    mock.pushMessage({
+      type: "response.failed",
+      response: { id: "resp_first_failure" },
+      error: { code: "server_error", message: "failed before response.created" },
+    });
+    await expect(sent).rejects.toMatchObject({ status: 500 });
+
+    expect(pool.lookupResponseOwner("resp_first_failure")).toMatchObject({
+      kind: "gone",
+      tombstone: { reason: "response_failed", entryId: "entry-A" },
+    });
+  });
+
+  it("can evict a failed response's physical lane through its tombstone", async () => {
+    const { factory, created } = makeFactory();
+    const acquired = await pool.acquire("entry-A", "entry-A:conv-failed-lane", factory);
+    if (!("ws" in acquired)) throw new Error("expected acquire success");
+    const mock = created[0]["ws"] as unknown as MockWs;
+
+    const parent = acquired.ws.send({
+      request: { type: "response.create", model: "m", instructions: "", input: [] },
+      signal: undefined,
+      onRateLimits: undefined,
+      reused: false,
+    });
+    mock.pushMessage({ type: "response.completed", response: { id: "resp_parent" } });
+    await parent;
+    await nextTick();
+
+    const reused = pool.acquireForResponse("entry-A", "resp_parent");
+    if (!("ws" in reused)) throw new Error("expected owner reuse");
+    const child = reused.ws.send({
+      request: {
+        type: "response.create",
+        model: "m",
+        instructions: "",
+        input: [],
+        previous_response_id: "resp_parent",
+      },
+      signal: undefined,
+      onRateLimits: undefined,
+      reused: true,
+    });
+    mock.pushMessage({
+      type: "response.failed",
+      response: { id: "resp_child_failed" },
+      error: { code: "server_error", message: "child failed" },
+    });
+    await expect(child).rejects.toMatchObject({ status: 500 });
+
+    pool.evictByResponseId("resp_child_failed", "response_failed");
+    expect(pool.size()).toBe(0);
+    expect(pool.lookupResponseOwner("resp_parent")).toMatchObject({
+      kind: "gone",
+      tombstone: { reason: "response_failed" },
+    });
   });
 
   it("acquireForResponse fails closed on missing, busy, dead, and account-mismatched owners", async () => {
@@ -930,7 +1055,10 @@ describe("WsConnectionPool", () => {
     expect("ws" in owner).toBe(true);
     expect(pool.acquireForResponse("entry-A", "resp_A")).toEqual({ bypass: "busy" });
     mock.pushClose(1006, "gone");
-    expect(pool.acquireForResponse("entry-A", "resp_A")).toEqual({ bypass: "missing_owner" });
+    expect(pool.acquireForResponse("entry-A", "resp_A")).toMatchObject({
+      bypass: "missing_owner",
+      tombstone: { reason: "transport_closed", entryId: "entry-A" },
+    });
   });
 
   it("does not let a discarded same-key factory loser remove the winning connection", async () => {
@@ -993,7 +1121,10 @@ describe("WsConnectionPool", () => {
       expect(expiringPool.ownerWsId("resp_expired")).toBe(acquired.ws.id);
 
       now = 101;
-      expect(expiringPool.acquireForResponse("entry-A", "resp_expired")).toEqual({ bypass: "expired" });
+      expect(expiringPool.acquireForResponse("entry-A", "resp_expired")).toMatchObject({
+        bypass: "expired",
+        tombstone: { reason: "max_age_expired", entryId: "entry-A" },
+      });
       expect(expiringPool.ownerWsId("resp_expired")).toBeNull();
       expect(expiringPool.size()).toBe(0);
     } finally {
@@ -1091,4 +1222,5 @@ describe("effectiveWsPoolMaxPerAccount", () => {
     expect(effectiveWsPoolMaxPerAccount(16, 10)).toBe(16);
     expect(effectiveWsPoolMaxPerAccount(2, null)).toBe(3);
   });
+
 });

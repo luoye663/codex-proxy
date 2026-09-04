@@ -73,6 +73,11 @@ quota:
       - 80
       - 90
   skip_exhausted: true
+ws_pool:
+  enabled: true
+  max_age_ms: 3300000
+  max_per_account: 8
+  owner_tombstone_ttl_ms: 86400000
 update:
   auto_update: true
   show_update_dialog: false

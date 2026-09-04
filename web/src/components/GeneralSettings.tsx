@@ -32,6 +32,7 @@ export function GeneralSettings({ layoutMode, onLayoutModeChange }: GeneralSetti
   const [draftWsPoolEnabled, setDraftWsPoolEnabled] = useState<boolean | null>(null);
   const [draftWsPoolMax, setDraftWsPoolMax] = useState<string | null>(null);
   const [draftWsPoolMaxAgeMinutes, setDraftWsPoolMaxAgeMinutes] = useState<string | null>(null);
+  const [draftWsPoolTombstoneHours, setDraftWsPoolTombstoneHours] = useState<string | null>(null);
   const [draftRequestInterval, setDraftRequestInterval] = useState<string | null>(null);
   const [draftUsageHistoryRetention, setDraftUsageHistoryRetention] = useState<string | null>(null);
   const [draftAutoUpdate, setDraftAutoUpdate] = useState<boolean | null>(null);
@@ -72,6 +73,7 @@ export function GeneralSettings({ layoutMode, onLayoutModeChange }: GeneralSetti
   const currentWsPoolEnabled = gs.data?.ws_pool_enabled ?? true;
   const currentWsPoolMax = gs.data?.ws_pool_max_per_account ?? 8;
   const currentWsPoolMaxAgeMinutes = (gs.data?.ws_pool_max_age_ms ?? 3_300_000) / 60_000;
+  const currentWsPoolTombstoneHours = (gs.data?.ws_pool_owner_tombstone_ttl_ms ?? 86_400_000) / 3_600_000;
   const currentWsPoolEffectiveMax = gs.data?.ws_pool_effective_max_per_account ??
     Math.max(currentWsPoolMax, currentMaxConcurrent);
   const currentRequestInterval = gs.data?.request_interval_ms ?? 50;
@@ -99,6 +101,7 @@ export function GeneralSettings({ layoutMode, onLayoutModeChange }: GeneralSetti
   const displayWsPoolEnabled = draftWsPoolEnabled ?? currentWsPoolEnabled;
   const displayWsPoolMax = draftWsPoolMax ?? String(currentWsPoolMax);
   const displayWsPoolMaxAgeMinutes = draftWsPoolMaxAgeMinutes ?? String(currentWsPoolMaxAgeMinutes);
+  const displayWsPoolTombstoneHours = draftWsPoolTombstoneHours ?? String(currentWsPoolTombstoneHours);
   const displayRequestInterval = draftRequestInterval ?? String(currentRequestInterval);
   const displayUsageHistoryRetention = draftUsageHistoryRetention ?? (currentUsageHistoryRetention === null ? "" : String(currentUsageHistoryRetention));
   const displayAutoUpdate = draftAutoUpdate ?? currentAutoUpdate;
@@ -253,6 +256,21 @@ export function GeneralSettings({ layoutMode, onLayoutModeChange }: GeneralSetti
     }
     saveSingleField("ws_pool_max_age_ms", { ws_pool_max_age_ms: milliseconds }, () => setDraftWsPoolMaxAgeMinutes(null));
   }, [draftWsPoolMaxAgeMinutes, saveSingleField, t]);
+
+  const handleSaveWsPoolTombstoneHours = useCallback(() => {
+    if (draftWsPoolTombstoneHours === null) return;
+    const hours = Number(draftWsPoolTombstoneHours);
+    const milliseconds = hours * 3_600_000;
+    if (!Number.isInteger(hours) || hours < 1 || hours > 168 || !Number.isSafeInteger(milliseconds)) {
+      setFieldErrors((prev) => ({ ...prev, ws_pool_owner_tombstone_ttl_ms: t("settingErrorInvalidNumber") }));
+      return;
+    }
+    saveSingleField(
+      "ws_pool_owner_tombstone_ttl_ms",
+      { ws_pool_owner_tombstone_ttl_ms: milliseconds },
+      () => setDraftWsPoolTombstoneHours(null),
+    );
+  }, [draftWsPoolTombstoneHours, saveSingleField, t]);
 
   const handleSaveRequestInterval = useCallback(() => {
     if (draftRequestInterval === null) return;
@@ -748,6 +766,31 @@ export function GeneralSettings({ layoutMode, onLayoutModeChange }: GeneralSetti
                 onKeyDown={(e) => { if (e.key === "Enter") handleSaveWsPoolMaxAge(); }}
               />
               <span class="text-xs text-slate-500 dark:text-text-dim">min</span>
+            </div>
+          </SettingItemControl>
+
+          <SettingItemControl
+            label={t("generalSettingsWsPoolTombstoneTtl")}
+            hint={t("generalSettingsWsPoolTombstoneTtlHint")}
+            isDirty={draftWsPoolTombstoneHours !== null && draftWsPoolTombstoneHours !== String(currentWsPoolTombstoneHours)}
+            saving={!!savingFields.ws_pool_owner_tombstone_ttl_ms}
+            saved={savedFields.ws_pool_owner_tombstone_ttl_ms}
+            error={fieldErrors.ws_pool_owner_tombstone_ttl_ms}
+            requiresRestart={false}
+            onSave={handleSaveWsPoolTombstoneHours}
+          >
+            <div class="flex items-center gap-2">
+              <input
+                type="number"
+                min="1"
+                max="168"
+                step="1"
+                class={`${inputCls} max-w-[160px]`}
+                value={displayWsPoolTombstoneHours}
+                onInput={(e) => setDraftWsPoolTombstoneHours((e.target as HTMLInputElement).value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleSaveWsPoolTombstoneHours(); }}
+              />
+              <span class="text-xs text-slate-500 dark:text-text-dim">h</span>
             </div>
           </SettingItemControl>
 

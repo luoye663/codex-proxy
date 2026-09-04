@@ -138,4 +138,29 @@ describe("proxy error response helpers", () => {
     expect(text).toContain("internal error");
     expect(fmt.formatStreamError).toHaveBeenCalledWith(500, "internal error");
   });
+
+  it("returns the real pre-response HTTP status for local WS capacity errors", async () => {
+    const app = new Hono();
+    const fmt = createMockFormatAdapter();
+    app.get("/ws-capacity", (c) => respondWithProxyError({
+      c,
+      req: createRequest(true),
+      fmt,
+      status: 429,
+      message: "WebSocket pool capacity exceeded",
+      details: {
+        type: "rate_limit_error",
+        code: "ws_pool_capacity_exceeded",
+        retryable: true,
+      },
+    }));
+
+    const res = await app.request("/ws-capacity");
+    expect(res.status).toBe(429);
+    expect(fmt.formatStreamError).toHaveBeenCalledWith(
+      429,
+      "WebSocket pool capacity exceeded",
+      expect.objectContaining({ code: "ws_pool_capacity_exceeded" }),
+    );
+  });
 });

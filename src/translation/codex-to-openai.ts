@@ -401,6 +401,7 @@ export async function* streamCodexToOpenAI(
         break;
       }
 
+      case "response.incomplete":
       case "response.completed": {
         // Flush buffered tuple text as reconverted JSON
         if (tupleTextBuffer !== null && tupleSchema && tupleTextBuffer) {
@@ -528,6 +529,7 @@ export async function collectCodexResponse(
     eventCount++;
     if (
       evt.typed.type === "response.completed" ||
+      evt.typed.type === "response.incomplete" ||
       evt.typed.type === "response.failed"
     ) {
       sawTerminalEvent = true;

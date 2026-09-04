@@ -163,6 +163,8 @@ export interface WsPoolContext {
   pool: WsConnectionPool;
   poolKey: string;
   entryId: string;
+  /** Opaque account-token generation captured when a new WS is opened. */
+  credentialGeneration?: string;
   /** Optional observer fired once with the pool's dispatch decision. Useful
    *  for logging without coupling the caller to the pool's internal state. */
   onDecision?: (decision: WsDispatchDecision) => void;
@@ -178,6 +180,7 @@ function persistentFactory(
   wsUrl: string,
   headers: Record<string, string>,
   proxyUrl: string | null | undefined,
+  credentialGeneration?: string,
 ) {
   return (deps: { entryId: string; poolKey: string; hooks: PersistentWsHooks }) =>
     createPersistentWsConnection({
@@ -187,6 +190,7 @@ function persistentFactory(
       entryId: deps.entryId,
       poolKey: deps.poolKey,
       hooks: deps.hooks,
+      credentialGeneration,
     });
 }
 
@@ -201,7 +205,7 @@ async function acquirePooledForFullInput(
     return await poolCtx.pool.acquire(
       poolCtx.entryId,
       poolKey,
-      persistentFactory(wsUrl, headers, proxyUrl),
+      persistentFactory(wsUrl, headers, proxyUrl, poolCtx.credentialGeneration),
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -245,6 +249,7 @@ async function createPersistentWsConnection(opts: {
   entryId: string;
   poolKey: string;
   hooks: PersistentWsHooks;
+  credentialGeneration?: string;
 }): Promise<PersistentWs> {
   const WS = await getWS();
   const wsOpts = await buildWsConstructorOpts(WS, opts.headers, opts.proxyUrl);
@@ -257,6 +262,7 @@ async function createPersistentWsConnection(opts: {
     entryId: opts.entryId,
     poolKey: opts.poolKey,
     hooks: opts.hooks,
+    credentialGeneration: opts.credentialGeneration,
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -312,9 +318,11 @@ export async function createWebSocketResponse(
     const acquired = poolCtx.pool.acquireForResponse(poolCtx.entryId, previousResponseId);
     if (!("ws" in acquired)) {
       poolCtx.onDecision?.({ kind: "bypass", reason: acquired.bypass });
+      const reason = acquired.tombstone?.reason ??
+        (acquired.bypass === "missing_owner" ? "unknown_owner" : acquired.bypass);
       throw new PreviousResponseWebSocketError(
-        `Owning WebSocket is unavailable (${acquired.bypass})`,
-        acquired.bypass,
+        `Owning WebSocket is unavailable (${reason})`,
+        reason,
       );
     }
     poolCtx.onDecision?.({ kind: "reuse", wsId: acquired.ws.id });
@@ -322,7 +330,7 @@ export async function createWebSocketResponse(
       return await acquired.ws.send({ request, signal, onRateLimits, reused: true });
     } catch (err) {
       if (isPreviousResponseNotFoundError(err)) {
-        poolCtx.pool.forgetResponseOwner(previousResponseId);
+        poolCtx.pool.forgetResponseOwner(previousResponseId, "upstream_previous_response_not_found");
       }
       if (err instanceof WsReusedConnectionError) {
         throw new PreviousResponseWebSocketError(err.message, "transport");
