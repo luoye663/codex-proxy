@@ -24,6 +24,10 @@ const mockGeneralSettingsData = {
   refresh_margin_seconds: 300,
   refresh_concurrency: 2,
   max_concurrent_per_account: 3,
+  ws_pool_enabled: true,
+  ws_pool_max_per_account: 8,
+  ws_pool_max_age_ms: 3_300_000,
+  ws_pool_effective_max_per_account: 8,
   request_interval_ms: 50,
   auto_update: true,
   auto_download: false,
@@ -94,6 +98,45 @@ describe("GeneralSettings - allow_prerelease", () => {
 
     await waitFor(() => {
       expect(mockSave).toHaveBeenCalledWith({ allow_prerelease: true });
+    });
+  });
+});
+
+describe("GeneralSettings - WebSocket pool", () => {
+  it("saves the pool enable toggle", async () => {
+    render(<GeneralSettings />);
+
+    const checkbox = document.getElementById("ws-pool-enabled") as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByTitle("settingSave"));
+
+    await waitFor(() => {
+      expect(mockSave).toHaveBeenCalledWith({ ws_pool_enabled: false });
+    });
+  });
+
+  it("converts maximum age from minutes to milliseconds", async () => {
+    render(<GeneralSettings />);
+
+    const input = screen.getByDisplayValue("55") as HTMLInputElement;
+    fireEvent.input(input, { target: { value: "45" } });
+    fireEvent.click(screen.getByTitle("settingSave"));
+
+    await waitFor(() => {
+      expect(mockSave).toHaveBeenCalledWith({ ws_pool_max_age_ms: 2_700_000 });
+    });
+  });
+
+  it("saves the configured per-account retention limit", async () => {
+    render(<GeneralSettings />);
+
+    const input = screen.getByDisplayValue("8") as HTMLInputElement;
+    fireEvent.input(input, { target: { value: "12" } });
+    fireEvent.click(screen.getByTitle("settingSave"));
+
+    await waitFor(() => {
+      expect(mockSave).toHaveBeenCalledWith({ ws_pool_max_per_account: 12 });
     });
   });
 });
