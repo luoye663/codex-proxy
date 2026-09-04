@@ -72,6 +72,7 @@ export { parseSSEBlock, parseSSEStream } from "./codex-sse.js";
 import {
   CodexApiError,
   PreviousResponseWebSocketError,
+  WsPoolUnavailableError,
   type CodexResponsesRequest,
   type CodexCompactRequest,
   type CodexCompactResponse,
@@ -283,6 +284,12 @@ export class CodexApi {
       try {
         return await this.createResponseViaWebSocket(request, signal, onRateLimits, poolCtx);
       } catch (err) {
+        // Local pool retention is optional for requests without a continuation ID.
+        if (err instanceof WsPoolUnavailableError && !request.previous_response_id) {
+          if (signal?.aborted) throw signal.reason ?? err;
+          poolCtx?.onHttpFallback?.(err.poolReason);
+          return this.createResponseViaHttp(request, signal);
+        }
         // Real upstream API errors classified by ws-transport (e.g.
         // usage_limit_reached → CodexApiError(429)) must reach the
         // proxy-handler's rotation flow on the SAME account, not retry

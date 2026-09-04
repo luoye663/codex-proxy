@@ -18,6 +18,7 @@ export type ProxyResumeEvaluationInput = Omit<ImplicitResumeOpts, "acquiredEntry
 export interface BuildProxySessionContextOptions {
   request: ProxyRequest;
   affinityMap: SessionAffinityMap;
+  hasUsableResponseOwner?: (responseId: string) => boolean;
 }
 
 export interface ProxySessionContext {
@@ -55,7 +56,7 @@ export function buildProxySessionContext(
   const chainConversationId = explicitConversationId ?? effectiveConversationId;
   const variantIdentity = buildVariantIdentity(codexRequest, promptCacheIdentity);
   const variantHash = computeVariantHash(currentInstructions, codexRequest.tools, variantIdentity);
-  const implicitPrevRespId =
+  const implicitCandidate =
     !explicitPrevRespId &&
     continuationInputStart > 0 &&
     effectiveConversationId
@@ -64,6 +65,10 @@ export function buildProxySessionContext(
           IMPLICIT_RESUME_MAX_AGE_MS,
           variantHash,
         )
+      : null;
+  const implicitPrevRespId = implicitCandidate &&
+    (!options.hasUsableResponseOwner || options.hasUsableResponseOwner(implicitCandidate))
+      ? implicitCandidate
       : null;
   const prevRespId = explicitPrevRespId ?? implicitPrevRespId;
   const implicitStoredInstructionsHash = implicitPrevRespId

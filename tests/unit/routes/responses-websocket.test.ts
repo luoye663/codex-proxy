@@ -372,6 +372,23 @@ describe("client-facing WebSocket on /v1/responses (issue #681)", () => {
     ws.close();
   });
 
+  it("preserves diagnostics from a non-200 SSE response.failed frame", async () => {
+    const { handleProxyRequest } = await import("@src/routes/shared/proxy-handler.js");
+    const error = {
+      type: "rate_limit_error", code: "ws_response_owner_unavailable",
+      continuity_reason: "account_temporarily_unavailable", retryable: true, message: "Owner cooling down",
+    };
+    vi.mocked(handleProxyRequest).mockImplementationOnce(async () => new Response(
+      `event: response.failed\ndata: ${JSON.stringify({ type: "response.failed", response: { error } })}\n\n`,
+      { status: 429, headers: { "content-type": "text/event-stream" } },
+    ));
+    const { ws } = await connectClient(port);
+    const received = receiveJsonFrames(ws, 1);
+    ws.send(RESPONSE_CREATE_BODY);
+    expect((await received)[0]).toMatchObject({ type: "error", error: { ...error, status: 429 } });
+    ws.close();
+  });
+
   it("rejects an upgrade with a disabled client key with 401 (validateAccess at handshake)", async () => {
     mockConfig.server.proxy_api_key = "master-key";
     const entry = clientKeyPool.createKey({ name: "disabled-key", key: "ck-disabled" });

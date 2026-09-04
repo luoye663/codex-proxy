@@ -40,6 +40,10 @@ export function lookupWsResponseOwner(responseId: string): ResponseOwnerLookup {
   return getWsPool().lookupResponseOwner(responseId);
 }
 
+export function hasUsableWsResponseOwner(responseId: string): boolean {
+  return getWsPool().hasUsableResponseOwner(responseId);
+}
+
 /** Evict only the lane owning one failed response chain. */
 export function evictWsResponseOwnerLane(
   responseId: string,
@@ -70,6 +74,9 @@ export function buildWsPoolContext(
     ].filter((part): part is string => Boolean(part)).join(":"),
     entryId,
     credentialGeneration: options.credentialGeneration,
+    onHttpFallback: (reason) => {
+      log(`[${options.tag}] Account ${entryId} | rid=${options.requestId.slice(0, 8)} | transport=http-sse | ws-fallback=${reason}`);
+    },
     onDecision: (decision) => {
       const ridShort = options.requestId.slice(0, 8);
       const wsTag = decision.kind === "bypass"

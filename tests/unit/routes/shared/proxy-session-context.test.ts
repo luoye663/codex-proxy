@@ -166,6 +166,15 @@ describe("buildProxySessionContext", () => {
       storedFunctionCallIds: ["call_a"],
       inlineFunctionCallIds: ["call_a"],
     });
+
+    const withoutOwner = buildProxySessionContext({
+      request, affinityMap, hasUsableResponseOwner: () => false,
+    });
+    expect(withoutOwner.implicitPrevRespId).toBeNull();
+    expect(withoutOwner.resumeEvaluationInput.implicitPrevRespId).toBeNull();
+    expect(buildProxySessionContext({
+      request, affinityMap, hasUsableResponseOwner: () => true,
+    }).implicitPrevRespId).toBe("resp_implicit");
   });
 
   it("derives correct variantHash and currentInstructions when system instructions are inlined in input[0]", () => {

@@ -976,6 +976,13 @@ export class WsConnectionPool {
     return tombstone ? { kind: "gone", tombstone } : { kind: "unknown" };
   }
 
+  /** Read-only eligibility check; acquireForResponse still checks atomically. */
+  hasUsableResponseOwner(responseId: string): boolean {
+    const key = this.ownerByResponse.get(responseId);
+    const owner = key ? this.map.get(key) : undefined;
+    return Boolean(key && owner?.isAlive() && !owner.isExpired(this.maxAgeFor(key)));
+  }
+
   /** Evict every WS for an entry after a permanent account transition. */
   evictByEntryId(entryId: string, reason: ResponseOwnerGoneReason = "account_disabled"): void {
     const keys = this.byEntry.get(entryId);

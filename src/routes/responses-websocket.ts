@@ -313,7 +313,7 @@ export class ResponsesWebSocketServer {
     }
 
     const contentType = response.headers.get("content-type") ?? "";
-    if (!response.ok || !contentType.includes("text/event-stream")) {
+    if (!contentType.includes("text/event-stream")) {
       const textBody = await response.text();
       this.sendErrorFrame(ws, textBody, response.status);
       return;
@@ -322,6 +322,12 @@ export class ResponsesWebSocketServer {
     try {
       for await (const event of parseSSEStream(response)) {
         if (ws.readyState !== WS_OPEN || signal.aborted) break;
+        if (!response.ok) {
+          const data = event.data as Record<string, unknown>;
+          const failed = data?.response as Record<string, unknown> | undefined;
+          this.sendErrorFrame(ws, JSON.stringify(failed?.error ? { error: failed.error } : data), response.status);
+          continue;
+        }
         // Forward the JSON payload of each SSE `data:` line.
         ws.send(JSON.stringify(event.data));
       }

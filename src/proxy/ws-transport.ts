@@ -160,6 +160,7 @@ export interface WsCreateRequest {
  *  retains every successful full-input response on a pooled WS so a later
  *  `previous_response_id` can return to its physical owner. */
 export interface WsPoolContext {
+  onHttpFallback?: (reason: "capacity" | "connection") => void;
   pool: WsConnectionPool;
   poolKey: string;
   entryId: string;

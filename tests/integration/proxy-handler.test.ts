@@ -6,6 +6,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// These orchestrator fixtures mock the upstream; their seeded affinity IDs
+// represent live WS owners. Physical ownership is covered by pool integration tests.
+vi.mock("@src/routes/shared/proxy-ws-context.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@src/routes/shared/proxy-ws-context.js")>(),
+  hasUsableWsResponseOwner: () => true,
+}));
 import { Hono } from "hono";
 import type { FormatCollectTranslatorOptions, ProxyRequest } from "@src/routes/shared/proxy-handler-types.js";
 import type { WsPoolContext } from "@src/proxy/codex-api.js";

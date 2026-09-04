@@ -67,6 +67,7 @@ import {
   evictWsResponseOwnerLane,
   forgetWsResponseOwner,
   lookupWsResponseOwner,
+  hasUsableWsResponseOwner,
 } from "./proxy-ws-context.js";
 import {
   containsInvalidEncryptedContentSignal,
@@ -145,7 +146,9 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
   const requestId = c.get("requestId") ?? randomUUID().slice(0, 8);
   ensureProxyRequestInputArray(req);
   const originalRequestState = captureImplicitResumeRequestState(req);
-  const sessionContext = buildProxySessionContext({ request: req, affinityMap });
+  const sessionContext = buildProxySessionContext({
+    request: req, affinityMap, hasUsableResponseOwner: hasUsableWsResponseOwner,
+  });
   let chainAdvanceTicket = sessionContext.chainAdvanceTicket;
   let recoveryWsKeySuffix: string | undefined;
   let continuityRecoveryCount = 0;

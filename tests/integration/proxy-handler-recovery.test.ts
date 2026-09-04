@@ -6,6 +6,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// Seeded affinity represents an owner that is live at lookup and fails during send.
+vi.mock("@src/routes/shared/proxy-ws-context.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@src/routes/shared/proxy-ws-context.js")>(),
+  hasUsableWsResponseOwner: () => true,
+}));
 import type { WsPoolContext } from "@src/proxy/codex-api.js";
 import type { CodexResponsesRequest } from "@src/proxy/codex-types.js";
 import type { ParsedRateLimit } from "@src/proxy/rate-limit-headers.js";
