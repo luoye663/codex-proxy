@@ -33,6 +33,14 @@ export function formatUsd(usd: number): string {
   return sign + "$" + abs.toFixed(2);
 }
 
+/** Format a full USD amount by truncating, rather than rounding, to two decimals. */
+export function formatTruncatedUsd(usd: number, includeSymbol = true): string {
+  if (!Number.isFinite(usd)) return includeSymbol ? "$0.00" : "0.00";
+  const truncated = Math.trunc(Math.abs(usd) * 100) / 100;
+  const sign = usd < 0 ? "-" : "";
+  return `${sign}${includeSymbol ? "$" : ""}${truncated.toFixed(2)}`;
+}
+
 export function formatWindowDuration(seconds: number, lang?: LangCode | boolean): string {
   const isZhSimp = lang === "zh" || lang === true;
   const isZhTrad = lang === "zh-TW" || lang === "zh-HK";

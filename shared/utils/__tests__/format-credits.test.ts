@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatCredits, creditsToUsd, formatUsd, formatWindowDuration, formatResetTime } from "../format";
+import { formatTruncatedUsd, formatCredits, creditsToUsd, formatUsd, formatWindowDuration, formatResetTime } from "../format";
 
 describe("formatCredits", () => {
   it("renders zero as plain '0'", () => {
@@ -57,6 +57,18 @@ describe("formatUsd", () => {
 
   it("handles negatives", () => {
     expect(formatUsd(-12.34)).toBe("-$12.34");
+  });
+});
+
+describe("formatTruncatedUsd", () => {
+  it("truncates to two decimal places without rounding", () => {
+    expect(formatTruncatedUsd(0.0064)).toBe("$0.00");
+    expect(formatTruncatedUsd(745.659)).toBe("$745.65");
+    expect(formatTruncatedUsd(3994.609)).toBe("$3994.60");
+  });
+
+  it("can omit the currency symbol for the total half of a paired value", () => {
+    expect(formatTruncatedUsd(3994.609, false)).toBe("3994.60");
   });
 });
 

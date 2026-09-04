@@ -12,6 +12,7 @@
 
 - 新增可选 No-Node Lite Browser/Server 发行版：保留现有 Electron 安装包不变，额外提供 `codex-proxy-<版本>-no-node-lite-all-platforms.tar.xz`，包含后端、前端资源、各平台 native addon 和启动器，支持无图形界面的 server 模式以及浏览器模式；Windows 通过 MSYS2 MinGW 构建 x86/x64 WebView2 host，并可选携带 Evergreen Bootstrapper。（`scripts/portable/`、`.github/workflows/lite-ci.yml`、`.github/workflows/release.yml`）
 - 支持 OpenAI GPT-6 Astra 系列（`gpt-6-astra`、`gpt-6-astra-aeon` 及别名 `gpt-6`）与 GPT-Reserve（`gpt-reserve`）：内置静态模型元数据与推理级别定义（`/v1/models/catalog` 可见），`gpt-6` 别名解析到 `gpt-6-astra`，可路由性已由 #776 的名称形态放行覆盖；同步适配 1,050,000 上下文窗口、Ollama 桥接架构系列识别与官方定价估算（`src/models/model-store.ts`、`src/ollama/bridge.ts`、`config/model-pricing.yaml`、`README.md`）。
+- 概览页“已连接账户”卡片在主速率限制下方新增“本周期金额”，按现有模型价格表展示本周期预估 API 等价成本；所有上游额度刷新入口统一同步主窗口，窗口明确换期或到期后金额自动归零。
 - 重构 Dashboard UI 视觉体系与设置交互逻辑：
   - 移除窗口顶部菜单栏，并将窗口标题统一为「Codex Proxy」（`packages/electron/electron/main.ts`、`web/index.html`）。
   - 全局优化浅色与深色色彩体系及统一系统/等宽字体层级渲染（`web/src/index.css`、`web/tailwind.config.ts`）。
@@ -34,6 +35,10 @@
 
 ### Fixed
 
+- 修复 Codex Responses Lite 请求只转发内部标记、却丢失 `reasoning.context=all_turns` 的问题：HTTP、WebSocket、compact 及 `codex-responses` API-key wire 现在统一应用完整 Lite 合同，同时强制 `parallel_tool_calls=false`，避免上游以 `unsupported_value` 拒绝请求并导致 WebSocket 以 1012 提前关闭。
+- 修复 `/v1/alpha/search` 仅支持 `codex-responses` API-key wire、使用 ChatGPT OAuth/Codex 模型时固定返回 400 的问题：搜索请求现在可通过账号池转发至 `/backend-api/codex/alpha/search`，并复用 Cookie、代理、请求上下文、账号轮换及安全响应头过滤。
+- 收紧 OAuth Search 错误分类：除 401/429 外的普通 4xx 现在原样终止，不再误判为账号欠费、封禁或 Cloudflare path-block，也不会清除 Cookie；显式 Cloudflare challenge、认证失效、限流和可重试服务端错误仍沿用安全换号策略。
+- 修复 Docker 生产依赖裁剪后再次无约束安装 `tsx` 可能长时间卡住的问题：`tsx` 现作为 update-checker 的显式运行时依赖由 lockfile 一次性安装，镜像阶段只执行确定性的 production prune。
 - 修复速率限制重置卡（Reset Cards）在请求转发后从控制台消失的问题：被动响应头更新 quota 时保留已知的 `reset_credits_available`，并在重置卡查询与消耗逻辑中同步更新账号配额缓存（`src/auth/account-registry.ts`、`src/auth/active-quota-refresher.ts`、`src/routes/accounts.ts`）。
 - 修复 Dashboard 顶部导航栏与侧栏「Codex Proxy」左侧品牌图标错误的问题：将手绘六边形 SVG 替换为官方 Logo 图片（`web/public/icon.png`），与桌面端 / Web 应用图标保持一致。（`web/src/components/Header.tsx`、`web/src/components/Sidebar.tsx`）
 - 修复并统一桌面端与 Web 端应用图标与 Logo：生成包含 Windows 完整多分辨率的 `icon.ico`、Web `favicon.ico` / `icon.png`，Electron 主进程窗口配置中注入应用图标并移除 `electron-builder` 的 `signAndEditExecutable: false` 以确保可执行文件与任务栏/桌面快捷方式正确嵌入图标；统一 Dashboard 顶部导航栏 Logo 为品牌立方体图标。（`packages/electron/`、`web/`、`scripts/build/generate-ico.ps1`）

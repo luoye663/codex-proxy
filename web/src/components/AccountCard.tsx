@@ -6,6 +6,7 @@ import {
   formatCredits,
   formatNumber,
   formatResetTime,
+  formatTruncatedUsd,
   formatUsd,
   formatWindowDuration,
 } from "../../../shared/utils/format";
@@ -108,6 +109,7 @@ export function AccountCard({ account, index, onDelete, proxies, onProxyChange, 
   const tokens = (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
   const winRequests = usage.window_request_count ?? 0;
   const winTokens = (usage.window_input_tokens ?? 0) + (usage.window_output_tokens ?? 0);
+  const winEstimatedCost = usage.window_estimated_cost_usd ?? 0;
   const imageTokens = (usage.image_input_tokens ?? 0) + (usage.image_output_tokens ?? 0);
   const winImageTokens = (usage.window_image_input_tokens ?? 0) + (usage.window_image_output_tokens ?? 0);
   const imageRequests = usage.image_request_count ?? 0;
@@ -134,6 +136,14 @@ export function AccountCard({ account, index, onDelete, proxies, onProxyChange, 
   const pct = rl?.limit_reached ? 100
     : rl?.used_percent != null ? Math.round(rl.used_percent)
     : (account.status === "active" ? 0 : null);
+  const rawUsedPercent = rl?.limit_reached
+    ? 100
+    : typeof rl?.used_percent === "number" && Number.isFinite(rl.used_percent) && rl.used_percent > 0
+      ? rl.used_percent
+      : null;
+  const projectedWindowTotal = rawUsedPercent == null
+    ? null
+    : winEstimatedCost / rawUsedPercent * 100;
   const barColor =
     pct == null ? "bg-primary-action" : pct >= 90 ? "bg-red-500" : pct >= 60 ? "bg-amber-500" : "bg-primary-action";
   const pctColor =
@@ -417,6 +427,14 @@ export function AccountCard({ account, index, onDelete, proxies, onProxyChange, 
           <span class="text-slate-500 dark:text-text-dim">{t("windowTokens")}</span>
           <span class="font-medium">{formatNumber(winTokens)}</span>
         </div>
+        {account.concurrency && (
+          <div data-testid="account-concurrency" class="flex justify-between text-[0.78rem]">
+            <span class="text-slate-500 dark:text-text-dim">{t("concurrency")}</span>
+            <span class="font-medium">
+              {formatNumber(account.concurrency.used)} / {formatNumber(account.concurrency.limit)}
+            </span>
+          </div>
+        )}
         {hasImageActivity && (
           <>
             <div class="flex justify-between text-[0.78rem]">
@@ -514,6 +532,18 @@ export function AccountCard({ account, index, onDelete, proxies, onProxyChange, 
                   {t("resetsAt")} {resetAt}
                 </p>
               )}
+              <div
+                data-testid="window-estimated-cost"
+                title={t("projectedWindowTotalHint")}
+                class="flex justify-between text-[0.78rem] mt-2"
+              >
+                <span class="text-slate-500 dark:text-text-dim">{t("windowEstimatedCost")}</span>
+                <span class="font-medium text-amber-600 dark:text-amber-400">
+                  ({formatTruncatedUsd(winEstimatedCost)} / {projectedWindowTotal == null
+                    ? "—"
+                    : formatTruncatedUsd(projectedWindowTotal, false)})
+                </span>
+              </div>
             </div>
           )}
 
