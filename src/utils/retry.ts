@@ -1,4 +1,4 @@
-import { CodexApiError } from "../proxy/codex-api.js";
+import { CodexApiError, WsPoolUnavailableError } from "../proxy/codex-api.js";
 
 /** Retry a function on 5xx errors with exponential backoff. */
 export async function withRetry<T>(
@@ -16,7 +16,9 @@ export async function withRetry<T>(
     } catch (err) {
       lastError = err;
       const isRetryable =
-        err instanceof CodexApiError && err.status >= 500 && err.status < 600;
+        err instanceof CodexApiError &&
+        !(err instanceof WsPoolUnavailableError) &&
+        err.status >= 500 && err.status < 600;
       if (!isRetryable || attempt === maxRetries) throw err;
       const delay = baseDelayMs * Math.pow(2, attempt);
       console.warn(

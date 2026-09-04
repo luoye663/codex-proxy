@@ -582,7 +582,11 @@ export class CodexApi {
 }
 
 // Re-export CodexApiError for backward compatibility
-export { CodexApiError, PreviousResponseWebSocketError } from "./codex-types.js";
+export {
+  CodexApiError,
+  PreviousResponseWebSocketError,
+  WsPoolUnavailableError,
+} from "./codex-types.js";
 
 async function readTransportBody(
   stream: ReadableStream<Uint8Array>,

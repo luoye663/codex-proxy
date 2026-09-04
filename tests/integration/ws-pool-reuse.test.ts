@@ -156,9 +156,10 @@ describe("ws-pool integration: persistent connection reuse", () => {
     expect(text).toContain("resp_retry");
     expect(text).not.toContain("resp_metadata_only");
     expect(server.connectionCount()).toBe(2);
-    // Stale reuse falls back to a one-shot connection; the old pooled socket
-    // has been evicted and the one-shot retry is not inserted into the pool.
-    expect(pool.size()).toBe(0);
+    // Stale reuse now reconnects into the pool, so the successful retry can be
+    // continued by previous_response_id instead of becoming an orphan.
+    expect(pool.size()).toBe(1);
+    expect(pool.ownerWsId("resp_retry")).not.toBeNull();
   });
 
   it("disabled pool falls back to one-shot connections (every turn opens a new socket)", async () => {

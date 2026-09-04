@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { handleCodexApiError, type ErrorAction } from "@src/routes/shared/proxy-error-handler.js";
-import { CodexApiError } from "@src/proxy/codex-types.js";
+import { CodexApiError, WsPoolUnavailableError } from "@src/proxy/codex-types.js";
 import { _resetAllCfPathBlocks } from "@src/auth/cf-path-block-tracker.js";
 import {
   _resetAllCfChallengeCooldowns,
@@ -45,6 +45,30 @@ describe("handleCodexApiError", () => {
   beforeEach(() => {
     pool = createMockPool();
     _resetAllCfChallengeCooldowns();
+  });
+
+  it("retries a local WS pool failure on another account without mutating health", () => {
+    const err = new WsPoolUnavailableError("capacity", "pool full");
+    const result = handleCodexApiError(err, pool as never, entryId, model, tag, false);
+
+    expect(result).toMatchObject({
+      action: "retry",
+      status: 429,
+      releaseBeforeRetry: true,
+      useFormat429: true,
+    });
+    expect(pool.markStatus).not.toHaveBeenCalled();
+    expect(pool.applyRateLimit429).not.toHaveBeenCalled();
+  });
+
+  it("keeps a local WS connection failure as 503 without mutating health", () => {
+    const err = new WsPoolUnavailableError("connection", "connect failed");
+    const result = handleCodexApiError(err, pool as never, entryId, model, tag, false);
+
+    expect(result).toMatchObject({ action: "retry", status: 503, releaseBeforeRetry: true });
+    expect(result).not.toHaveProperty("useFormat429");
+    expect(pool.markStatus).not.toHaveBeenCalled();
+    expect(pool.applyRateLimit429).not.toHaveBeenCalled();
   });
 
   // ── model-not-supported ──

@@ -4,6 +4,7 @@ import {
   PersistentWs,
   WsConnectionPool,
   WsReusedConnectionError,
+  effectiveWsPoolMaxPerAccount,
   setWsPoolConfig,
   getWsPool,
   _resetWsPoolForTests,
@@ -709,6 +710,85 @@ describe("WsConnectionPool", () => {
     await disabled.shutdown();
   });
 
+  it("disabled reconfiguration drains existing response owners safely", async () => {
+    const { factory, created } = makeFactory();
+    const acquired = await pool.acquire("entry-A", "entry-A:conv-drain", factory);
+    if (!("ws" in acquired)) throw new Error("expected acquire success");
+    const sent = acquired.ws.send({
+      request: { type: "response.create", model: "m", instructions: "", input: [] },
+      signal: undefined,
+      onRateLimits: undefined,
+      reused: false,
+    });
+    const mock = created[0]["ws"] as unknown as MockWs;
+    mock.pushMessage({ type: "response.completed", response: { id: "resp_drain" } });
+    await sent;
+    await nextTick();
+
+    pool.reconfigure({ enabled: false });
+    expect(await pool.acquire("entry-A", "entry-A:new", factory)).toEqual({ bypass: "disabled" });
+    expect(pool.acquireForResponse("entry-A", "resp_drain")).toMatchObject({ reused: true });
+  });
+
+  it("keeps the original max age for existing owners after reconfiguration", async () => {
+    let now = 0;
+    const agingPool = new WsConnectionPool({ maxAgeMs: 100 }, { startGc: false });
+    const mocks: MockWs[] = [];
+    const factory = vi.fn(async (deps: { entryId: string; poolKey: string; hooks: PersistentWsHooks }) => {
+      const ws = new MockWs();
+      mocks.push(ws);
+      return new PersistentWs({ ...deps, ws, now: () => now });
+    });
+    try {
+      const old = await agingPool.acquire("entry-A", "entry-A:old", factory);
+      if (!("ws" in old)) throw new Error("expected old acquire success");
+      const oldSent = old.ws.send({
+        request: { type: "response.create", model: "m", instructions: "", input: [] },
+        signal: undefined,
+        onRateLimits: undefined,
+        reused: false,
+      });
+      mocks[0].pushMessage({ type: "response.completed", response: { id: "resp_old" } });
+      await oldSent;
+      await nextTick();
+
+      agingPool.reconfigure({ maxAgeMs: 10 });
+      const fresh = await agingPool.acquire("entry-A", "entry-A:fresh", factory);
+      if (!("ws" in fresh)) throw new Error("expected fresh acquire success");
+      const freshSent = fresh.ws.send({
+        request: { type: "response.create", model: "m", instructions: "", input: [] },
+        signal: undefined,
+        onRateLimits: undefined,
+        reused: false,
+      });
+      mocks[1].pushMessage({ type: "response.completed", response: { id: "resp_fresh" } });
+      await freshSent;
+      await nextTick();
+
+      now = 11;
+      expect(agingPool.acquireForResponse("entry-A", "resp_fresh")).toEqual({ bypass: "expired" });
+      expect(agingPool.acquireForResponse("entry-A", "resp_old")).toMatchObject({ reused: true });
+    } finally {
+      await agingPool.shutdown();
+    }
+  });
+
+  it("retains existing connections when a hot update lowers the cap", async () => {
+    const capped = new WsConnectionPool({ maxPerAccount: 2 }, { startGc: false });
+    const { factory } = makeFactory();
+    try {
+      await capped.acquire("entry-A", "entry-A:conv-1", factory);
+      await capped.acquire("entry-A", "entry-A:conv-2", factory);
+
+      capped.reconfigure({ maxPerAccount: 1 });
+
+      expect(capped.size()).toBe(2);
+      expect(await capped.acquire("entry-A", "entry-A:conv-3", factory)).toEqual({ bypass: "cap" });
+    } finally {
+      await capped.shutdown();
+    }
+  });
+
   it("acquire returns bypass(cap) when entry already at max_per_account", async () => {
     const capped = new WsConnectionPool({ maxPerAccount: 2 }, { startGc: false });
     const { factory } = makeFactory();
@@ -995,11 +1075,20 @@ describe("singleton wiring (setWsPoolConfig + getWsPool)", () => {
     expect(factory).toHaveBeenCalledTimes(1);
   });
 
-  it("setWsPoolConfig replaces an existing singleton (later override wins)", async () => {
-    setWsPoolConfig({ enabled: true });
-    setWsPoolConfig({ enabled: false });
+  it("setWsPoolConfig reconfigures the existing singleton in place", async () => {
+    const initial = setWsPoolConfig({ enabled: true });
+    const updated = setWsPoolConfig({ enabled: false });
+    expect(updated).toBe(initial);
     const pool = getWsPool();
     const factory = vi.fn(async () => { throw new Error("unreachable"); });
     expect(await pool.acquire("e", "k", factory)).toEqual({ bypass: "disabled" });
+  });
+});
+
+describe("effectiveWsPoolMaxPerAccount", () => {
+  it("uses account concurrency as a lower bound without discarding a larger retention limit", () => {
+    expect(effectiveWsPoolMaxPerAccount(8, 10)).toBe(10);
+    expect(effectiveWsPoolMaxPerAccount(16, 10)).toBe(16);
+    expect(effectiveWsPoolMaxPerAccount(2, null)).toBe(3);
   });
 });

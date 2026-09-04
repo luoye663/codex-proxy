@@ -20,7 +20,11 @@
 import type { CodexInputItem, CodexReasoning } from "./codex-api.js";
 import type { ParsedRateLimit } from "./rate-limit-headers.js";
 import { parseRateLimitsEvent } from "./rate-limit-headers.js";
-import { CodexApiError, PreviousResponseWebSocketError } from "./codex-types.js";
+import {
+  CodexApiError,
+  PreviousResponseWebSocketError,
+  WsPoolUnavailableError,
+} from "./codex-types.js";
 import { getProxyUrl } from "../tls/proxy.js";
 import { isPreviousResponseNotFoundError } from "./error-classification.js";
 import {
@@ -153,8 +157,8 @@ export interface WsCreateRequest {
 }
 
 /** Optional pool routing context. When provided, `createWebSocketResponse`
- *  tries to reuse a pooled WS for `(entryId, poolKey)` before falling back
- *  to opening a fresh one-shot connection. */
+ *  retains every successful full-input response on a pooled WS so a later
+ *  `previous_response_id` can return to its physical owner. */
 export interface WsPoolContext {
   pool: WsConnectionPool;
   poolKey: string;
@@ -169,6 +173,44 @@ export type WsDispatchDecision =
   | { kind: "new"; wsId: string }
   | { kind: "bypass"; reason: string }
   | { kind: "retry-after-stale-reuse"; wsId: string };
+
+function persistentFactory(
+  wsUrl: string,
+  headers: Record<string, string>,
+  proxyUrl: string | null | undefined,
+) {
+  return (deps: { entryId: string; poolKey: string; hooks: PersistentWsHooks }) =>
+    createPersistentWsConnection({
+      wsUrl,
+      headers,
+      proxyUrl,
+      entryId: deps.entryId,
+      poolKey: deps.poolKey,
+      hooks: deps.hooks,
+    });
+}
+
+async function acquirePooledForFullInput(
+  wsUrl: string,
+  headers: Record<string, string>,
+  proxyUrl: string | null | undefined,
+  poolCtx: WsPoolContext,
+  poolKey: string,
+) {
+  try {
+    return await poolCtx.pool.acquire(
+      poolCtx.entryId,
+      poolKey,
+      persistentFactory(wsUrl, headers, proxyUrl),
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new WsPoolUnavailableError(
+      "connection",
+      `Unable to open a continuity-preserving WebSocket: ${message}`,
+    );
+  }
+}
 
 async function buildWsConstructorOpts(
   WS: typeof import("ws").default,
@@ -247,7 +289,7 @@ async function createPersistentWsConnection(opts: {
  *
  * When `poolCtx` is provided the call first tries to reuse a pooled WS for
  * `(entryId, poolKey)`; on a `WsReusedConnectionError` (stale-reuse failure)
- * it falls back to a fresh one-shot connection exactly once.
+ * it retries on a fresh pooled connection exactly once.
  */
 export async function createWebSocketResponse(
   wsUrl: string,
@@ -290,27 +332,18 @@ export async function createWebSocketResponse(
   }
 
   if (poolCtx) {
-    let acquired;
-    try {
-      acquired = await poolCtx.pool.acquire(
-        poolCtx.entryId,
-        poolCtx.poolKey,
-        (deps) =>
-          createPersistentWsConnection({
-            wsUrl,
-            headers,
-            proxyUrl,
-            entryId: deps.entryId,
-            poolKey: deps.poolKey,
-            hooks: deps.hooks,
-          }),
+    let acquired = await acquirePooledForFullInput(
+      wsUrl, headers, proxyUrl, poolCtx, poolCtx.poolKey,
+    );
+
+    if (!("ws" in acquired) && acquired.bypass === "busy") {
+      // A sibling request is using the canonical chain. Give this full-input
+      // request its own retained branch so a successful response always has an
+      // owner for the next turn.
+      const branchKey = `${poolCtx.poolKey}:branch:${crypto.randomUUID()}`;
+      acquired = await acquirePooledForFullInput(
+        wsUrl, headers, proxyUrl, poolCtx, branchKey,
       );
-    } catch (err) {
-      // Only connection construction/acquisition errors reach this fallback.
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[ws-pool] acquire failed, using one-shot fallback: ${msg}`);
-      poolCtx.onDecision?.({ kind: "bypass", reason: "factory_error" });
-      return openOneShotWs(wsUrl, headers, request, signal, proxyUrl, onRateLimits);
     }
 
     if ("ws" in acquired) {
@@ -322,10 +355,20 @@ export async function createWebSocketResponse(
         return await acquired.ws.send({ request, signal, onRateLimits, reused: acquired.reused });
       } catch (err) {
         // With full input and no previous_response_id, a pre-response failure
-        // on a reused WS is safe to replay once on a fresh one-shot.
+        // on a reused WS is safe to replay once on a fresh pooled connection.
         if (err instanceof WsReusedConnectionError) {
           poolCtx.onDecision?.({ kind: "retry-after-stale-reuse", wsId: acquired.ws.id });
-          return openOneShotWs(wsUrl, headers, request, signal, proxyUrl, onRateLimits);
+          const replacement = await acquirePooledForFullInput(
+            wsUrl, headers, proxyUrl, poolCtx, poolCtx.poolKey,
+          );
+          if (!("ws" in replacement)) {
+            throw new WsPoolUnavailableError(
+              replacement.bypass === "cap" ? "capacity" : "connection",
+              `Unable to retain replacement WebSocket (${replacement.bypass})`,
+            );
+          }
+          poolCtx.onDecision?.({ kind: "new", wsId: replacement.ws.id });
+          return replacement.ws.send({ request, signal, onRateLimits, reused: false });
         }
         // Real upstream errors must propagate. They are not pool acquisition
         // failures and must never trigger a cross-WS replay.
@@ -333,8 +376,16 @@ export async function createWebSocketResponse(
       }
     }
 
-    // No previous_response_id: a full-input one-shot is safe on pool bypass.
+    // Explicitly disabled pools retain the legacy one-shot behavior. All
+    // enabled-pool capacity failures fail before creating an orphan response.
     poolCtx.onDecision?.({ kind: "bypass", reason: acquired.bypass });
+    if (acquired.bypass === "disabled" || acquired.bypass === "no_key") {
+      return openOneShotWs(wsUrl, headers, request, signal, proxyUrl, onRateLimits);
+    }
+    throw new WsPoolUnavailableError(
+      acquired.bypass === "cap" ? "capacity" : "connection",
+      `Unable to retain WebSocket response owner (${acquired.bypass})`,
+    );
   }
 
   return openOneShotWs(wsUrl, headers, request, signal, proxyUrl, onRateLimits);

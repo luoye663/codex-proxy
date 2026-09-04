@@ -5,6 +5,10 @@ import { getConfigDir, getDataDir } from "./paths.js";
 import { ConfigSchema, FingerprintSchema } from "./config-schema.js";
 import { loadYaml, loadMergedConfig, applyEnvOverrides } from "./config-loader.js";
 import type { AppConfig, FingerprintConfig } from "./config-schema.js";
+import {
+  effectiveWsPoolMaxPerAccount,
+  getWsPool,
+} from "./proxy/ws-pool.js";
 
 // Re-export schema, types, and constants so all existing importers keep working
 export { ROTATION_STRATEGIES, ConfigSchema, FingerprintSchema } from "./config-schema.js";
@@ -107,9 +111,17 @@ export function reloadFingerprint(configDir?: string): FingerprintConfig {
 
 /** Reload both config and fingerprint from disk, plus static models. */
 export function reloadAllConfigs(configDir?: string): void {
-  reloadConfig(configDir);
+  const config = reloadConfig(configDir);
   reloadFingerprint(configDir);
   loadStaticModels(configDir);
+  getWsPool().reconfigure({
+    enabled: config.ws_pool.enabled,
+    maxAgeMs: config.ws_pool.max_age_ms,
+    maxPerAccount: effectiveWsPoolMaxPerAccount(
+      config.ws_pool.max_per_account,
+      config.auth.max_concurrent_per_account,
+    ),
+  });
   console.log("[Config] Hot-reloaded config, fingerprint, and models from disk");
   // Re-merge backend models so hot-reload doesn't wipe them for ~1h
   triggerImmediateRefresh();

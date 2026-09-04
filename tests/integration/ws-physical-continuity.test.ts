@@ -121,6 +121,61 @@ describe("physical WebSocket response continuity", () => {
     held.abort();
   });
 
+  it("retains a pooled branch when a full-input request races a busy canonical socket", async () => {
+    const held = new AbortController();
+    let sequence = 0;
+    onRequest = (item) => {
+      const marker = (item.payload.input[0] as { content?: string }).content;
+      if (marker !== "held-root") complete(item, `resp_branch_${++sequence}`);
+    };
+
+    const pendingRoot = createWebSocketResponse(
+      url, {}, request("held-root"), held.signal, null, undefined, context(),
+    );
+    pendingRoot.catch(() => undefined);
+    await waitFor(() => seen.length === 1);
+
+    await drain(await createWebSocketResponse(
+      url, {}, request("branch-root"), undefined, null, undefined, context(),
+    ));
+    expect(connectionCount).toBe(2);
+    expect(pool.ownerWsId("resp_branch_1")).not.toBeNull();
+
+    await drain(await createWebSocketResponse(
+      url, {}, request("branch-next", "resp_branch_1"), undefined, null, undefined, context(),
+    ));
+    expect(connectionCount).toBe(2);
+    expect(seen[2].connection).toBe(seen[1].connection);
+    held.abort();
+  });
+
+  it("fails the root request at pool capacity instead of creating an orphan one-shot response", async () => {
+    await pool.shutdown();
+    pool = new WsConnectionPool(
+      { enabled: true, maxAgeMs: 60_000, maxPerAccount: 1 },
+      { startGc: false },
+    );
+    const held = new AbortController();
+    onRequest = () => undefined;
+
+    const pendingRoot = createWebSocketResponse(
+      url, {}, request("held-root"), held.signal, null, undefined, context(),
+    );
+    pendingRoot.catch(() => undefined);
+    await waitFor(() => seen.length === 1);
+
+    await expect(createWebSocketResponse(
+      url, {}, request("overflow-root"), undefined, null, undefined, context(),
+    )).rejects.toMatchObject({
+      name: "WsPoolUnavailableError",
+      status: 429,
+      poolReason: "capacity",
+    });
+    expect(connectionCount).toBe(1);
+    expect(seen).toHaveLength(1);
+    held.abort();
+  });
+
   it("fails closed after the owner dies without opening a replacement carrying the old ID", async () => {
     onRequest = (item) => complete(item, "resp_1");
     await drain(await createWebSocketResponse(url, {}, request("first"), undefined, null, undefined, context()));

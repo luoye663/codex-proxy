@@ -6,6 +6,10 @@ import { mutateYaml } from "../../utils/yaml-mutate.js";
 import { isLocalhostRequest } from "../../utils/is-localhost.js";
 import type { AccountPool } from "../../auth/account-pool.js";
 import {
+  DEFAULT_WS_POOL_CONFIG,
+  effectiveWsPoolMaxPerAccount,
+} from "../../proxy/ws-pool.js";
+import {
   getRoutableCodexHostModelAllowedModels,
   IMAGE_HOST_MODEL_CLIENT_ID,
   isImageHostModelClientId,
@@ -122,6 +126,11 @@ export function createSettingsRoutes(accountPool?: AccountPool): Hono {
 
   app.get("/admin/general-settings", (c) => {
     const config = getConfig();
+    const wsPool = config.ws_pool ?? {
+      enabled: DEFAULT_WS_POOL_CONFIG.enabled,
+      max_per_account: DEFAULT_WS_POOL_CONFIG.maxPerAccount,
+      max_age_ms: DEFAULT_WS_POOL_CONFIG.maxAgeMs,
+    };
     return c.json({
       port: config.server.port,
       proxy_url: config.tls.proxy_url,
@@ -140,6 +149,13 @@ export function createSettingsRoutes(accountPool?: AccountPool): Hono {
       refresh_margin_seconds: config.auth.refresh_margin_seconds,
       refresh_concurrency: config.auth.refresh_concurrency,
       max_concurrent_per_account: config.auth.max_concurrent_per_account,
+      ws_pool_enabled: wsPool.enabled,
+      ws_pool_max_per_account: wsPool.max_per_account,
+      ws_pool_max_age_ms: wsPool.max_age_ms,
+      ws_pool_effective_max_per_account: effectiveWsPoolMaxPerAccount(
+        wsPool.max_per_account,
+        config.auth.max_concurrent_per_account,
+      ),
       request_interval_ms: config.auth.request_interval_ms,
       auto_update: config.update.auto_update,
       auto_download: config.update.auto_download,
@@ -172,6 +188,9 @@ export function createSettingsRoutes(accountPool?: AccountPool): Hono {
       refresh_margin_seconds?: number;
       refresh_concurrency?: number;
       max_concurrent_per_account?: number | null;
+      ws_pool_enabled?: boolean;
+      ws_pool_max_per_account?: number;
+      ws_pool_max_age_ms?: number;
       request_interval_ms?: number | null;
       auto_update?: boolean;
       auto_download?: boolean;
@@ -285,6 +304,23 @@ export function createSettingsRoutes(accountPool?: AccountPool): Hono {
       }
     }
 
+    if (body.ws_pool_enabled !== undefined && typeof body.ws_pool_enabled !== "boolean") {
+      c.status(400);
+      return c.json({ error: "ws_pool_enabled must be a boolean" });
+    }
+
+    if (body.ws_pool_max_per_account !== undefined &&
+        (!Number.isInteger(body.ws_pool_max_per_account) || body.ws_pool_max_per_account < 1)) {
+      c.status(400);
+      return c.json({ error: "ws_pool_max_per_account must be an integer >= 1" });
+    }
+
+    if (body.ws_pool_max_age_ms !== undefined &&
+        (!Number.isInteger(body.ws_pool_max_age_ms) || body.ws_pool_max_age_ms < 1)) {
+      c.status(400);
+      return c.json({ error: "ws_pool_max_age_ms must be an integer >= 1" });
+    }
+
     if (body.request_interval_ms !== undefined && body.request_interval_ms !== null) {
       if (!Number.isInteger(body.request_interval_ms) || body.request_interval_ms < 0) {
         c.status(400);
@@ -377,6 +413,20 @@ export function createSettingsRoutes(accountPool?: AccountPool): Hono {
         if (!data.auth) data.auth = {};
         (data.auth as Record<string, unknown>).max_concurrent_per_account = body.max_concurrent_per_account;
       }
+      if (body.ws_pool_enabled !== undefined ||
+          body.ws_pool_max_per_account !== undefined ||
+          body.ws_pool_max_age_ms !== undefined) {
+        if (!data.ws_pool) data.ws_pool = {};
+        if (body.ws_pool_enabled !== undefined) {
+          (data.ws_pool as Record<string, unknown>).enabled = body.ws_pool_enabled;
+        }
+        if (body.ws_pool_max_per_account !== undefined) {
+          (data.ws_pool as Record<string, unknown>).max_per_account = body.ws_pool_max_per_account;
+        }
+        if (body.ws_pool_max_age_ms !== undefined) {
+          (data.ws_pool as Record<string, unknown>).max_age_ms = body.ws_pool_max_age_ms;
+        }
+      }
       if (body.request_interval_ms !== undefined) {
         if (!data.auth) data.auth = {};
         (data.auth as Record<string, unknown>).request_interval_ms = body.request_interval_ms;
@@ -432,6 +482,11 @@ export function createSettingsRoutes(accountPool?: AccountPool): Hono {
     }
 
     const updated = getConfig();
+    const updatedWsPool = updated.ws_pool ?? {
+      enabled: DEFAULT_WS_POOL_CONFIG.enabled,
+      max_per_account: DEFAULT_WS_POOL_CONFIG.maxPerAccount,
+      max_age_ms: DEFAULT_WS_POOL_CONFIG.maxAgeMs,
+    };
     const restartRequired =
       (body.port !== undefined && body.port !== oldPort) ||
       (body.default_model !== undefined && body.default_model !== oldDefaultModel);
@@ -454,6 +509,13 @@ export function createSettingsRoutes(accountPool?: AccountPool): Hono {
       refresh_margin_seconds: updated.auth.refresh_margin_seconds,
       refresh_concurrency: updated.auth.refresh_concurrency,
       max_concurrent_per_account: updated.auth.max_concurrent_per_account,
+      ws_pool_enabled: updatedWsPool.enabled,
+      ws_pool_max_per_account: updatedWsPool.max_per_account,
+      ws_pool_max_age_ms: updatedWsPool.max_age_ms,
+      ws_pool_effective_max_per_account: effectiveWsPoolMaxPerAccount(
+        updatedWsPool.max_per_account,
+        updated.auth.max_concurrent_per_account,
+      ),
       request_interval_ms: updated.auth.request_interval_ms,
       auto_update: updated.update.auto_update,
       auto_download: updated.update.auto_download,

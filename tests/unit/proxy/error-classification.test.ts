@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { CodexApiError } from "@src/proxy/codex-types.js";
+import { CodexApiError, WsPoolUnavailableError } from "@src/proxy/codex-types.js";
 import {
   extractRetryAfterSec,
   isBanError,
@@ -7,6 +7,7 @@ import {
   isCfPathBlockError,
   isQuotaExhaustedError,
   isServerOverloadedError,
+  isWsPoolUnavailableError,
   isEarlyServerError,
   isTokenInvalidError,
   isModelNotSupportedError,
@@ -75,6 +76,35 @@ describe("isServerOverloadedError", () => {
     expect(isServerOverloadedError(new CodexApiError(503, "database unavailable"))).toBe(false);
     expect(isServerOverloadedError(new CodexApiError(502, JSON.stringify({
       error: { code: "server_is_overloaded" },
+    })))).toBe(false);
+  });
+});
+
+describe("isWsPoolUnavailableError", () => {
+  it("recognizes the distinct capacity and connection status mappings", () => {
+    const capacity = new WsPoolUnavailableError("capacity", "pool full");
+    const connection = new WsPoolUnavailableError("connection", "connect failed");
+
+    expect(capacity.status).toBe(429);
+    expect(JSON.parse(capacity.body).error).toMatchObject({
+      type: "rate_limit_error",
+      code: "ws_pool_capacity_exceeded",
+    });
+    expect(connection.status).toBe(503);
+    expect(JSON.parse(connection.body).error).toMatchObject({
+      type: "server_error",
+      code: "ws_pool_connection_unavailable",
+    });
+    expect(isWsPoolUnavailableError(capacity)).toBe(true);
+    expect(isWsPoolUnavailableError(connection)).toBe(true);
+  });
+
+  it("rejects mismatched statuses and unrelated 429 responses", () => {
+    expect(isWsPoolUnavailableError(new CodexApiError(503, JSON.stringify({
+      error: { code: "ws_pool_capacity_exceeded" },
+    })))).toBe(false);
+    expect(isWsPoolUnavailableError(new CodexApiError(429, JSON.stringify({
+      error: { code: "rate_limit_exceeded" },
     })))).toBe(false);
   });
 });

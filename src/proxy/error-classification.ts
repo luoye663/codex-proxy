@@ -65,6 +65,21 @@ export function isServerOverloadedError(err: unknown): boolean {
   }
 }
 
+/** Local pool capacity/connectivity failure. Safe to try another account, but
+ *  must never mutate the current account's upstream health state. */
+export function isWsPoolUnavailableError(err: unknown): boolean {
+  if (!isCodexLike(err)) return false;
+  try {
+    const parsed = JSON.parse(err.body) as Record<string, unknown>;
+    const error = parsed.error as Record<string, unknown> | undefined;
+    const code = error?.code;
+    return (code === "ws_pool_capacity_exceeded" && err.status === 429) ||
+      (code === "ws_pool_connection_unavailable" && err.status === 503);
+  } catch {
+    return false;
+  }
+}
+
 /** Check if a 500 is the transient upstream server error emitted before output. */
 export function isEarlyServerError(err: unknown): boolean {
   if (!isCodexLike(err) || err.status !== 500) return false;

@@ -31,6 +31,7 @@ const mockConfig = {
     max_concurrent_per_account: 3 as number | null,
     request_interval_ms: 50 as number | null,
   },
+  ws_pool: { enabled: true, max_per_account: 8, max_age_ms: 3_300_000 },
   update: { auto_update: true, auto_download: false, show_update_dialog: false, allow_prerelease: false },
   logs: { enabled: false, capacity: 2000, capture_body: false, llm_only: true },
   usage_stats: {
@@ -153,6 +154,10 @@ describe("GET /admin/general-settings", () => {
       image_host_model: "gpt-5.5",
       model_aliases: {},
       refresh_enabled: true,
+      ws_pool_enabled: true,
+      ws_pool_max_per_account: 8,
+      ws_pool_max_age_ms: 3_300_000,
+      ws_pool_effective_max_per_account: 8,
       auto_update: true,
       auto_download: false,
       show_update_dialog: false,
@@ -246,6 +251,36 @@ describe("POST /admin/general-settings", () => {
     expect(data.restart_required).toBe(false);
     expect(mutateYaml).toHaveBeenCalledOnce();
     expect(reloadAllConfigs).toHaveBeenCalledOnce();
+  });
+
+  it("persists WebSocket pool settings without requiring restart", async () => {
+    const app = makeApp();
+    const res = await app.request("/admin/general-settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ws_pool_enabled: false,
+        ws_pool_max_per_account: 12,
+        ws_pool_max_age_ms: 2_700_000,
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.success).toBe(true);
+    expect(data.restart_required).toBe(false);
+    expect(mutateYaml).toHaveBeenCalledOnce();
+    expect(reloadAllConfigs).toHaveBeenCalledOnce();
+    const mutate = vi.mocked(mutateYaml).mock.calls[0]?.[1];
+    const localConfig: Record<string, unknown> = {};
+    mutate?.(localConfig);
+    expect(localConfig).toEqual({
+      ws_pool: {
+        enabled: false,
+        max_per_account: 12,
+        max_age_ms: 2_700_000,
+      },
+    });
   });
 
   it("persists show_update_dialog without requiring restart", async () => {

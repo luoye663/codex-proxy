@@ -281,3 +281,34 @@ export class PreviousResponseWebSocketError extends CodexApiError {
     this.name = "PreviousResponseWebSocketError";
   }
 }
+
+export type WsPoolUnavailableReason = "capacity" | "connection";
+
+/**
+ * A local WebSocket-pool failure that happened before a response was created.
+ * Keeping this separate from upstream errors lets callers rotate accounts without
+ * marking an otherwise healthy account as overloaded or retrying the same full
+ * pool with exponential backoff.
+ */
+export class WsPoolUnavailableError extends CodexApiError {
+  constructor(
+    public readonly poolReason: WsPoolUnavailableReason,
+    message: string,
+  ) {
+    const capacityExceeded = poolReason === "capacity";
+    const code = capacityExceeded
+      ? "ws_pool_capacity_exceeded"
+      : "ws_pool_connection_unavailable";
+    super(
+      capacityExceeded ? 429 : 503,
+      JSON.stringify({
+        error: {
+          type: capacityExceeded ? "rate_limit_error" : "server_error",
+          code,
+          message,
+        },
+      }),
+    );
+    this.name = "WsPoolUnavailableError";
+  }
+}

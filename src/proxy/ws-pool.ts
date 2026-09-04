@@ -25,8 +25,9 @@
  *   (entryId from `account-persistence.ts:57`, conversationId from
  *   `proxy-handler.ts:226`). Empty conversationId → don't pool.
  * - **Per-WS strict serial**: Codex protocol requires one in-flight at a
- *   time per WS (mirrors codex-rs's `last_response_rx` pattern). Pool busy
- *   → caller bypasses to `openOneShotWs` (no internal queue, no deadlock).
+ *   time per WS (mirrors codex-rs's `last_response_rx` pattern). For a new
+ *   full-input request, a busy canonical connection gets a separately pooled
+ *   branch so its response can retain a physical owner for continuation.
  * - **No idle TTL**: kept open until natural death (server close / TCP RST →
  *   immediate evict), `max_age_ms` (55 min, leaves 5 min margin under the
  *   server's 60 min hard cap), or account state change (refresh / banned /
@@ -38,7 +39,7 @@
  * ## Failure semantics
  *
  * - WS dies **before** first response frame on a reused connection →
- *   `WsReusedConnectionError` (caller may retry once with a fresh WS).
+ *   `WsReusedConnectionError` (caller may retry once with a fresh pooled WS).
  * - WS dies **after** the first frame (mid-stream RST) → `controller.error()`
  *   on the live ReadableStream. Cannot retry — the client already saw
  *   partial data, must propagate the error.
@@ -56,7 +57,7 @@ import { randomUUID } from "crypto";
 // ── Error types ────────────────────────────────────────────────────
 
 /** Thrown when a *reused* pooled WS dies before producing the first response
- *  frame. The caller should retry once with a fresh non-pooled connection,
+ *  frame. The caller should retry once with a fresh pooled connection,
  *  since the failure was caused by stale state on the reused connection
  *  rather than by a real upstream/account issue. */
 export class WsReusedConnectionError extends Error {
@@ -658,14 +659,21 @@ export class WsConnectionPool {
   private readonly ownerByResponse = new Map<string, string>();
   /** The upstream keeps only the most recent response per physical WS. */
   private readonly responseByPoolKey = new Map<string, string>();
-  private readonly config: WsPoolConfig;
+  /** Max age is captured when a connection enters the pool so a hot config
+   *  update never invalidates an already-issued response owner. */
+  private readonly maxAgeByPoolKey = new Map<string, number>();
+  private config: WsPoolConfig;
+  private readonly gcEnabled: boolean;
+  private readonly gcIntervalMs: number;
   private gcInterval: NodeJS.Timeout | undefined;
   private shuttingDown = false;
 
   constructor(config: Partial<WsPoolConfig> = {}, opts: { startGc?: boolean; gcIntervalMs?: number } = {}) {
     this.config = { ...DEFAULT_WS_POOL_CONFIG, ...config };
-    if (opts.startGc !== false && this.config.enabled) {
-      this.gcInterval = setInterval(() => this.gcSweep(), opts.gcIntervalMs ?? 60_000);
+    this.gcEnabled = opts.startGc !== false;
+    this.gcIntervalMs = opts.gcIntervalMs ?? 60_000;
+    if (this.gcEnabled && this.config.enabled) {
+      this.gcInterval = setInterval(() => this.gcSweep(), this.gcIntervalMs);
       this.gcInterval.unref?.();
     }
   }
@@ -693,7 +701,7 @@ export class WsConnectionPool {
     }
 
     let existing = this.map.get(poolKey);
-    if (existing && (!existing.isAlive() || existing.isExpired(this.config.maxAgeMs))) {
+    if (existing && (!existing.isAlive() || existing.isExpired(this.maxAgeFor(poolKey)))) {
       existing.closeGracefully();
       this.removeEntry(existing);
       existing = undefined;
@@ -749,7 +757,7 @@ export class WsConnectionPool {
       if (racer.isAlive() && racer.tryAcquire()) {
         return { ws: racer, reused: true };
       }
-      // Racer is busy too — bypass and let caller open a one-shot.
+      // Racer is busy too — report it so the caller can retain a pooled branch.
       return { bypass: "busy" };
     }
 
@@ -761,6 +769,7 @@ export class WsConnectionPool {
     }
 
     this.map.set(poolKey, fresh);
+    this.maxAgeByPoolKey.set(poolKey, this.config.maxAgeMs);
     let entryKeys = this.byEntry.get(entryId);
     if (!entryKeys) {
       entryKeys = new Set();
@@ -774,7 +783,9 @@ export class WsConnectionPool {
    *  This method never creates a connection: a response ID must not cross a
    *  physical WebSocket boundary when store=false. */
   acquireForResponse(entryId: string, previousResponseId: string): AcquireResult | ResponseOwnerBypass {
-    if (!this.config.enabled || this.shuttingDown) return { bypass: "disabled" };
+    // Disabled pools drain safely: no new connections are created, but an
+    // existing response owner remains usable until it dies or expires.
+    if (this.shuttingDown) return { bypass: "disabled" };
     if (!entryId || !previousResponseId) return { bypass: "no_key" };
 
     const poolKey = this.ownerByResponse.get(previousResponseId);
@@ -789,7 +800,7 @@ export class WsConnectionPool {
       this.removeEntry(owner);
       return { bypass: "dead" };
     }
-    if (owner.isExpired(this.config.maxAgeMs)) {
+    if (owner.isExpired(this.maxAgeFor(poolKey))) {
       owner.closeGracefully();
       this.removeEntry(owner);
       return { bypass: "expired" };
@@ -841,6 +852,24 @@ export class WsConnectionPool {
     return this.map.size;
   }
 
+  /** Current effective per-account retention limit. */
+  maxPerAccount(): number {
+    return this.config.maxPerAccount;
+  }
+
+  /**
+   * Apply configuration without replacing the singleton or clearing response
+   * owners. Lower limits and disablement drain naturally; they only block new
+   * pooled connections.
+   */
+  reconfigure(config: Partial<WsPoolConfig>): void {
+    this.config = { ...this.config, ...config };
+    if (this.gcEnabled && this.config.enabled && !this.gcInterval && !this.shuttingDown) {
+      this.gcInterval = setInterval(() => this.gcSweep(), this.gcIntervalMs);
+      this.gcInterval.unref?.();
+    }
+  }
+
   /** Gracefully close all pooled connections. Called from process exit. */
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
@@ -858,13 +887,14 @@ export class WsConnectionPool {
     this.pendingCreatesByEntry.clear();
     this.ownerByResponse.clear();
     this.responseByPoolKey.clear();
+    this.maxAgeByPoolKey.clear();
   }
 
   /** Periodic sweep: drop dead/expired idle entries. Skips busy ones. */
   gcSweep(): void {
     for (const [, ws] of this.map) {
       if (ws.isBusy()) continue;
-      if (!ws.isAlive() || ws.isExpired(this.config.maxAgeMs)) {
+      if (!ws.isAlive() || ws.isExpired(this.maxAgeFor(ws.poolKey))) {
         ws.closeGracefully();
       }
     }
@@ -877,6 +907,10 @@ export class WsConnectionPool {
       return;
     }
     this.pendingCreatesByEntry.set(entryId, pendingCreates - 1);
+  }
+
+  private maxAgeFor(poolKey: string): number {
+    return this.maxAgeByPoolKey.get(poolKey) ?? this.config.maxAgeMs;
   }
 
   private registerResponseOwner(poolKey: string, responseId: string): void {
@@ -899,6 +933,7 @@ export class WsConnectionPool {
     const ws = this.map.get(poolKey);
     if (!ws) return;
     this.map.delete(poolKey);
+    this.maxAgeByPoolKey.delete(poolKey);
     const ownedResponse = this.responseByPoolKey.get(poolKey);
     if (ownedResponse) {
       this.responseByPoolKey.delete(poolKey);
@@ -923,11 +958,20 @@ export function getWsPool(): WsConnectionPool {
 
 export function setWsPoolConfig(config: Partial<WsPoolConfig>): WsConnectionPool {
   if (_singleton) {
-    // Replace existing singleton with new config; let GC clean old one.
-    void _singleton.shutdown();
+    _singleton.reconfigure(config);
+    return _singleton;
   }
   _singleton = new WsConnectionPool(config);
   return _singleton;
+}
+
+/** WS retention may be configured independently, but it must never be below
+ *  the number of requests the account scheduler can dispatch concurrently. */
+export function effectiveWsPoolMaxPerAccount(
+  configuredMax: number,
+  maxConcurrentPerAccount: number | null | undefined,
+): number {
+  return Math.max(configuredMax, maxConcurrentPerAccount ?? 3);
 }
 
 /** Test-only: reset the singleton so each test gets a clean pool. */

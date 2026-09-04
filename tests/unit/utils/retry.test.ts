@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { CodexApiError } from "@src/proxy/codex-api.js";
+import { CodexApiError, WsPoolUnavailableError } from "@src/proxy/codex-api.js";
 
 // Import after mocks if needed — withRetry uses CodexApiError at runtime
 import { withRetry } from "@src/utils/retry.js";
@@ -53,4 +53,15 @@ describe("withRetry", () => {
       .rejects.toThrow("random");
     expect(fn).toHaveBeenCalledTimes(1);
   });
+
+  it.each(["capacity", "connection"] as const)(
+    "does not retry local WebSocket pool %s errors",
+    async (reason) => {
+      const fn = vi.fn().mockRejectedValue(new WsPoolUnavailableError(reason, "pool unavailable"));
+
+      await expect(withRetry(fn, { maxRetries: 2, baseDelayMs: 1 }))
+        .rejects.toThrow("pool unavailable");
+      expect(fn).toHaveBeenCalledTimes(1);
+    },
+  );
 });

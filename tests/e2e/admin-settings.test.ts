@@ -39,6 +39,7 @@ const mockConfig = {
     max_concurrent_per_account: 3 as number | null,
     request_interval_ms: 50 as number | null,
   },
+  ws_pool: { enabled: true, max_age_ms: 3_300_000, max_per_account: 8 },
   update: { auto_update: true, auto_download: false, show_update_dialog: false, allow_prerelease: false },
   logs: { enabled: false, capacity: 2000, capture_body: false, llm_only: true },
   usage_stats: { history_retention_days: null as number | null, credits_per_usd: 25 },
@@ -203,6 +204,12 @@ describe("GET /admin/general-settings", () => {
     expect(body).toHaveProperty("refresh_enabled");
     expect(body).toHaveProperty("default_reasoning_effort");
     expect(body).toHaveProperty("max_concurrent_per_account");
+    expect(body).toMatchObject({
+      ws_pool_enabled: true,
+      ws_pool_max_per_account: 8,
+      ws_pool_max_age_ms: 3_300_000,
+      ws_pool_effective_max_per_account: 8,
+    });
     expect(body).toHaveProperty("logs_enabled");
     expect(body).toHaveProperty("auto_update");
     expect(body).toHaveProperty("allow_prerelease");
@@ -232,6 +239,15 @@ describe("POST /admin/general-settings", () => {
       body: JSON.stringify({ logs_enabled: true }),
     });
     expect(res.status).toBe(401);
+  });
+
+  it("rejects invalid WebSocket pool settings", async () => {
+    const res = await app.request("/admin/general-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ws_pool_max_per_account: 0 }),
+    });
+    expect(res.status).toBe(400);
   });
 });
 

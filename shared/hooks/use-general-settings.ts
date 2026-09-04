@@ -20,6 +20,10 @@ export interface GeneralSettingsData {
   refresh_margin_seconds: number;
   refresh_concurrency: number;
   max_concurrent_per_account: number | null;
+  ws_pool_enabled: boolean;
+  ws_pool_max_per_account: number;
+  ws_pool_max_age_ms: number;
+  ws_pool_effective_max_per_account: number;
   request_interval_ms: number | null;
   auto_update: boolean;
   auto_download: boolean;
@@ -93,6 +97,10 @@ export function useGeneralSettings(apiKey: string | null) {
         refresh_margin_seconds: result.refresh_margin_seconds,
         refresh_concurrency: result.refresh_concurrency,
         max_concurrent_per_account: result.max_concurrent_per_account,
+        ws_pool_enabled: result.ws_pool_enabled,
+        ws_pool_max_per_account: result.ws_pool_max_per_account,
+        ws_pool_max_age_ms: result.ws_pool_max_age_ms,
+        ws_pool_effective_max_per_account: result.ws_pool_effective_max_per_account,
         request_interval_ms: result.request_interval_ms,
         auto_update: result.auto_update,
         auto_download: result.auto_download,

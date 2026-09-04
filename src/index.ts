@@ -25,7 +25,11 @@ import { createModelRoutes } from "./routes/models.js";
 import { createWebRoutes } from "./routes/web.js";
 import { CookieJar } from "./proxy/cookie-jar.js";
 import { ProxyPool } from "./proxy/proxy-pool.js";
-import { setWsPoolConfig, getWsPool } from "./proxy/ws-pool.js";
+import {
+  effectiveWsPoolMaxPerAccount,
+  setWsPoolConfig,
+  getWsPool,
+} from "./proxy/ws-pool.js";
 import { createProxyRoutes } from "./routes/proxies.js";
 import { createResponsesRoutes } from "./routes/responses.js";
 import { ResponsesWebSocketServer } from "./routes/responses-websocket.js";
@@ -137,7 +141,10 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   setWsPoolConfig({
     enabled: cfg.ws_pool.enabled,
     maxAgeMs: cfg.ws_pool.max_age_ms,
-    maxPerAccount: cfg.ws_pool.max_per_account,
+    maxPerAccount: effectiveWsPoolMaxPerAccount(
+      cfg.ws_pool.max_per_account,
+      cfg.auth.max_concurrent_per_account,
+    ),
   });
   const adapters = new Map<string, UpstreamAdapter>();
   if (cfg.providers.openai) {

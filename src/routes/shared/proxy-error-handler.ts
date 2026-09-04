@@ -14,6 +14,7 @@ import {
   isCfPathBlockError,
   isQuotaExhaustedError,
   isServerOverloadedError,
+  isWsPoolUnavailableError,
   isEarlyServerError,
   isTokenInvalidError,
   isModelNotSupportedError,
@@ -86,6 +87,23 @@ export function handleCodexApiError(
     }
     const status = toErrorStatus(err.status);
     return { action: "respond", status, message: err.message };
+  }
+
+  // Local pool capacity/connectivity is not an upstream account-health signal.
+  // A full-input request may safely try another account before returning the
+  // reason-specific downstream status (capacity=429, connection=503).
+  if (isWsPoolUnavailableError(err)) {
+    const capacityExceeded = err.status === 429;
+    console.warn(
+      `[${tag}] Account ${entryId} (${email}) | local WebSocket pool unavailable, trying different account...`,
+    );
+    return {
+      action: "retry",
+      releaseBeforeRetry: true,
+      status: capacityExceeded ? 429 : 503,
+      message: err.message,
+      ...(capacityExceeded ? { useFormat429: true } : {}),
+    };
   }
 
   console.error(`[${tag}] Account ${entryId} | Codex API error:`, err.message);

@@ -29,6 +29,9 @@ export function GeneralSettings({ layoutMode, onLayoutModeChange }: GeneralSetti
   const [draftRefreshMargin, setDraftRefreshMargin] = useState<string | null>(null);
   const [draftRefreshConcurrency, setDraftRefreshConcurrency] = useState<string | null>(null);
   const [draftMaxConcurrent, setDraftMaxConcurrent] = useState<string | null>(null);
+  const [draftWsPoolEnabled, setDraftWsPoolEnabled] = useState<boolean | null>(null);
+  const [draftWsPoolMax, setDraftWsPoolMax] = useState<string | null>(null);
+  const [draftWsPoolMaxAgeMinutes, setDraftWsPoolMaxAgeMinutes] = useState<string | null>(null);
   const [draftRequestInterval, setDraftRequestInterval] = useState<string | null>(null);
   const [draftUsageHistoryRetention, setDraftUsageHistoryRetention] = useState<string | null>(null);
   const [draftAutoUpdate, setDraftAutoUpdate] = useState<boolean | null>(null);
@@ -66,6 +69,11 @@ export function GeneralSettings({ layoutMode, onLayoutModeChange }: GeneralSetti
   const currentRefreshMargin = gs.data?.refresh_margin_seconds ?? 300;
   const currentRefreshConcurrency = gs.data?.refresh_concurrency ?? 2;
   const currentMaxConcurrent = gs.data?.max_concurrent_per_account ?? 3;
+  const currentWsPoolEnabled = gs.data?.ws_pool_enabled ?? true;
+  const currentWsPoolMax = gs.data?.ws_pool_max_per_account ?? 8;
+  const currentWsPoolMaxAgeMinutes = (gs.data?.ws_pool_max_age_ms ?? 3_300_000) / 60_000;
+  const currentWsPoolEffectiveMax = gs.data?.ws_pool_effective_max_per_account ??
+    Math.max(currentWsPoolMax, currentMaxConcurrent);
   const currentRequestInterval = gs.data?.request_interval_ms ?? 50;
   const currentUsageHistoryRetention = gs.data?.usage_history_retention_days ?? null;
   const currentAutoUpdate = gs.data?.auto_update ?? true;
@@ -88,6 +96,9 @@ export function GeneralSettings({ layoutMode, onLayoutModeChange }: GeneralSetti
   const displayRefreshMargin = draftRefreshMargin ?? String(currentRefreshMargin);
   const displayRefreshConcurrency = draftRefreshConcurrency ?? String(currentRefreshConcurrency);
   const displayMaxConcurrent = draftMaxConcurrent ?? String(currentMaxConcurrent);
+  const displayWsPoolEnabled = draftWsPoolEnabled ?? currentWsPoolEnabled;
+  const displayWsPoolMax = draftWsPoolMax ?? String(currentWsPoolMax);
+  const displayWsPoolMaxAgeMinutes = draftWsPoolMaxAgeMinutes ?? String(currentWsPoolMaxAgeMinutes);
   const displayRequestInterval = draftRequestInterval ?? String(currentRequestInterval);
   const displayUsageHistoryRetention = draftUsageHistoryRetention ?? (currentUsageHistoryRetention === null ? "" : String(currentUsageHistoryRetention));
   const displayAutoUpdate = draftAutoUpdate ?? currentAutoUpdate;
@@ -216,6 +227,32 @@ export function GeneralSettings({ layoutMode, onLayoutModeChange }: GeneralSetti
     }
     saveSingleField("max_concurrent_per_account", { max_concurrent_per_account: val }, () => setDraftMaxConcurrent(null));
   }, [draftMaxConcurrent, saveSingleField, t]);
+
+  const handleSaveWsPoolEnabled = useCallback(() => {
+    if (draftWsPoolEnabled === null) return;
+    saveSingleField("ws_pool_enabled", { ws_pool_enabled: draftWsPoolEnabled }, () => setDraftWsPoolEnabled(null));
+  }, [draftWsPoolEnabled, saveSingleField]);
+
+  const handleSaveWsPoolMax = useCallback(() => {
+    if (draftWsPoolMax === null) return;
+    const val = Number(draftWsPoolMax);
+    if (!Number.isInteger(val) || val < 1) {
+      setFieldErrors((prev) => ({ ...prev, ws_pool_max_per_account: t("settingErrorInvalidNumber") }));
+      return;
+    }
+    saveSingleField("ws_pool_max_per_account", { ws_pool_max_per_account: val }, () => setDraftWsPoolMax(null));
+  }, [draftWsPoolMax, saveSingleField, t]);
+
+  const handleSaveWsPoolMaxAge = useCallback(() => {
+    if (draftWsPoolMaxAgeMinutes === null) return;
+    const minutes = Number(draftWsPoolMaxAgeMinutes);
+    const milliseconds = minutes * 60_000;
+    if (!Number.isInteger(minutes) || minutes < 1 || !Number.isSafeInteger(milliseconds)) {
+      setFieldErrors((prev) => ({ ...prev, ws_pool_max_age_ms: t("settingErrorInvalidNumber") }));
+      return;
+    }
+    saveSingleField("ws_pool_max_age_ms", { ws_pool_max_age_ms: milliseconds }, () => setDraftWsPoolMaxAgeMinutes(null));
+  }, [draftWsPoolMaxAgeMinutes, saveSingleField, t]);
 
   const handleSaveRequestInterval = useCallback(() => {
     if (draftRequestInterval === null) return;
@@ -644,6 +681,74 @@ export function GeneralSettings({ layoutMode, onLayoutModeChange }: GeneralSetti
               onInput={(e) => setDraftMaxConcurrent((e.target as HTMLInputElement).value)}
               onKeyDown={(e) => { if (e.key === "Enter") handleSaveMaxConcurrent(); }}
             />
+          </SettingItemControl>
+
+          {/* WebSocket Pool */}
+          <SettingItemControl
+            label={t("generalSettingsWsPoolEnabled")}
+            hint={t("generalSettingsWsPoolEnabledHint")}
+            isDirty={draftWsPoolEnabled !== null && draftWsPoolEnabled !== currentWsPoolEnabled}
+            saving={!!savingFields.ws_pool_enabled}
+            saved={savedFields.ws_pool_enabled}
+            error={fieldErrors.ws_pool_enabled}
+            requiresRestart={false}
+            layout="inline"
+            onSave={handleSaveWsPoolEnabled}
+          >
+            <input
+              type="checkbox"
+              id="ws-pool-enabled"
+              checked={displayWsPoolEnabled}
+              onChange={(e) => setDraftWsPoolEnabled((e.target as HTMLInputElement).checked)}
+              class="w-4 h-4 rounded border-gray-300 dark:border-border-dark text-primary focus:ring-primary cursor-pointer"
+            />
+            <label for="ws-pool-enabled" class="text-xs font-semibold text-slate-700 dark:text-text-main cursor-pointer">
+              {t("generalSettingsWsPoolEnabled")}
+            </label>
+          </SettingItemControl>
+
+          <SettingItemControl
+            label={t("generalSettingsWsPoolMax")}
+            hint={`${t("generalSettingsWsPoolMaxHint")} ${t("generalSettingsWsPoolEffective")}: ${currentWsPoolEffectiveMax}.`}
+            isDirty={draftWsPoolMax !== null && draftWsPoolMax !== String(currentWsPoolMax)}
+            saving={!!savingFields.ws_pool_max_per_account}
+            saved={savedFields.ws_pool_max_per_account}
+            error={fieldErrors.ws_pool_max_per_account}
+            requiresRestart={false}
+            onSave={handleSaveWsPoolMax}
+          >
+            <input
+              type="number"
+              min="1"
+              class={`${inputCls} max-w-[160px]`}
+              value={displayWsPoolMax}
+              onInput={(e) => setDraftWsPoolMax((e.target as HTMLInputElement).value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleSaveWsPoolMax(); }}
+            />
+          </SettingItemControl>
+
+          <SettingItemControl
+            label={t("generalSettingsWsPoolMaxAge")}
+            hint={t("generalSettingsWsPoolMaxAgeHint")}
+            isDirty={draftWsPoolMaxAgeMinutes !== null && draftWsPoolMaxAgeMinutes !== String(currentWsPoolMaxAgeMinutes)}
+            saving={!!savingFields.ws_pool_max_age_ms}
+            saved={savedFields.ws_pool_max_age_ms}
+            error={fieldErrors.ws_pool_max_age_ms}
+            requiresRestart={false}
+            onSave={handleSaveWsPoolMaxAge}
+          >
+            <div class="flex items-center gap-2">
+              <input
+                type="number"
+                min="1"
+                step="1"
+                class={`${inputCls} max-w-[160px]`}
+                value={displayWsPoolMaxAgeMinutes}
+                onInput={(e) => setDraftWsPoolMaxAgeMinutes((e.target as HTMLInputElement).value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleSaveWsPoolMaxAge(); }}
+              />
+              <span class="text-xs text-slate-500 dark:text-text-dim">min</span>
+            </div>
           </SettingItemControl>
 
           {/* Request Interval */}
